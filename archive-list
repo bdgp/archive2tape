@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -eu -o pipefail
+find /media/lto8/ ! -type d -printf '%P\n' |sort |gzip >"$1.list.gz.tmp.$$"
+mv -v "$1.list.gz.tmp.$$" "$1.list.gz"
