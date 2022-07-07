@@ -1,0 +1,27 @@
+[package]
+name = "tape-archives"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ben Booth <benwbooth@gmail.com>"]
+
+[dependencies]
+regex = "*"
+structopt = "*"
+structopt-derive = "*"
+duct = "*"
+eyre = "*"
+color-eyre = "*"
+shell-words = "*"
+glob = "*"
+lazy_static = "*"
+lazy-regex = "*"
+which = "*"
+sysinfo = "*"
+rusqlite = "*"
+
+#[profile.dev]
+#opt-level = 2
+
+[[bin]]
+name = "archive2tape"
+path = "src/main.rs"
