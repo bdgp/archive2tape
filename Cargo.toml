@@ -18,6 +18,9 @@ lazy-regex = "*"
 which = "*"
 sysinfo = "*"
 rusqlite = "*"
+uuid = "*"
+stfu8 = "*"
+linked-hash-map = "*"
 
 #[profile.dev]
 #opt-level = 2
