@@ -5,6 +5,7 @@ use std::io::BufReader;
 use std::io::BufRead;
 use std::collections::HashSet;
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use regex::Regex;
 use glob::Pattern;
 
@@ -13,7 +14,7 @@ use std::vec::Vec;
 use duct::cmd;
 
 use lazy_static::lazy_static;
-use lazy_regex::{regex, regex_captures, regex_is_match};
+use lazy_regex::{regex, regex_captures, regex_is_match, regex_replace};
 
 use shell_words;
 use which::which;
@@ -25,6 +26,7 @@ use std::os::unix::ffi::OsStrExt;
 use linked_hash_map::LinkedHashMap;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
+use uuid::Uuid;
 
 
 // /dev/sg0 lto5 drive
@@ -121,6 +123,7 @@ struct Backup {
     date_created: i64,
     uuid: String,
     parent_backup_id: Option<i64>,
+    is_complete: bool,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
@@ -276,34 +279,6 @@ impl Options {
             }
         }
         Ok(tapes)
-    }
-
-    fn get_latest_backup_list(&self) -> Result<()> {
-        let conn = Connection::open(&self.db)?;
-        let mut stmt = conn.prepare("select * from backup order by date_created desc")?;
-        let mut backups = LinkedHashMap::<i64, Backup>::new();
-        let backup_iter = stmt.query_map([], |row| {
-            Ok(Backup{
-                id: row.get(0)?,
-                date_created: row.get(1)?,
-                uuid: row.get(2)?,
-                parent_backup_id: row.get(3)?,
-            })
-        })?;
-        for backup in backup_iter {
-            let backup = backup?;
-            backups.insert(backup.id, backup);
-        }
-        let mut backup_list = Vec::<Backup>::new();
-        if let Some((id, backup)) = backups.front() {
-            let mut backup = backup;
-            backup_list.push(backup.clone());
-            while let Some(parent_backup_id) = backup.parent_backup_id {
-                backup = &backups[&parent_backup_id];
-                backup_list.push(backup.clone());
-            }
-        }
-        Ok(())
     }
 
     fn insert_tape_record(&self, label: &str) -> Result<()> {
@@ -509,16 +484,6 @@ impl Options {
             size integer not null
         );
         create index if not exists file_path_mtime_size_idx on file (path,mtime,size);
-        drop table if exists new_file;
-        create table new_file (
-            id integer primary key autoincrement not null,
-            path text not null,
-            mtime integer not null,
-            size integer not null,
-            uid integer not null,
-            gid integer not null,
-            mode integer not null
-        );
         create table if not exists backup2file (
             backup_id integer not null references backup(id),
             file_id integer not null references file(id),
@@ -554,8 +519,48 @@ impl Options {
         // insert new_file records for each file entry
         let mut files = Vec::<File>::new();
         let mut conn = Connection::open(&self.db)?;
+
+        // get the parent backup ID
+        let mut parent_backup_id = Option::<i64>::None;
+        {
+            let mut stmt = conn.prepare(r#"select id from backup order by date_created desc limit 1"#)?;
+            let mut rows = stmt.query([])?;
+            if let Some(row) = rows.next()? {
+                parent_backup_id = Some(row.get(0)?);
+            }
+        }
+
+        let mut backup = None;
+        let backup_uuid = Uuid::new_v4();
+        {
+            let mut stmt = conn.prepare(r#"insert into backup (uuid,parent_backup_id) values (?1,?2) returning *"#)?;
+            let mut rows = stmt.query(params![backup_uuid.to_string(), parent_backup_id])?;
+            if let Some(row) = rows.next()? {
+                parent_backup_id = Some(row.get(0)?);
+                backup = Some(Backup {
+                    id: row.get(0)?,
+                    date_created: row.get(1)?,
+                    uuid: row.get(2)?,
+                    parent_backup_id: row.get(3)?,
+                    is_complete: row.get(4)?,
+                });
+            }
+        }
+        conn.execute("", params![])?;
+
         let tx = conn.transaction()?;
-        tx.execute_batch(r#"truncate table new_file;"#)?;
+        tx.execute_batch(r#"
+                drop table if exists new_file;
+                create table new_file (
+                    id integer primary key autoincrement not null,
+                    path text not null,
+                    mtime integer not null,
+                    size integer not null,
+                    uid integer not null,
+                    gid integer not null,
+                    mode integer not null
+                );
+        "#)?;
         {
             let mut stmt = tx.prepare("insert into new_file (path,mtime,size,uid,gid,mode) values (?1,?2,?3,?4,?5,?6)")?;
             for g in &self.patterns {
@@ -596,15 +601,9 @@ impl Options {
             }
         }
 
+        let mut backup_diffs = Vec::<BackupDiff>::new();
+        let mut to_copy = Vec::<NewFile>::new();
         {
-            // get the parent backup ID
-            let mut stmt = tx.prepare(r#"select id from backup order by date_created desc limit 1"#)?;
-            let mut rows = stmt.query([])?;
-            let mut parent_backup_id = Option::<i64>::None;
-            if let Some(row) = rows.next()? {
-                parent_backup_id = Some(row.get(0)?);
-            }
-
             // get the complete list of backup diffs from the db
             let mut stmt = tx.prepare(r#"
             with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
@@ -645,7 +644,6 @@ impl Options {
             order by nf.path nulls last, fb.path nulls last
             "#)?;
             let mut rows = stmt.query([parent_backup_id])?;
-            let mut backup_diffs = Vec::<BackupDiff>::new();
             while let Some(row) = rows.next()? {
                 let path: Option<String> = row.get(1)?;
                 let path2: Option<String> = row.get(14)?;
@@ -672,10 +670,39 @@ impl Options {
                         size: row.get(16)?,
                     })} else {None},
                 };
+                if let Some(new_file) = &backup_diff.new_file {
+                    if backup_diff.full_backup.is_none() {
+                        to_copy.push(new_file.clone());
+                    }
+                }
                 backup_diffs.push(backup_diff);
             }
         }
-        tx.commit()?;
+        tx.rollback()?;
+
+        if let Some(backup) = backup {
+            for file in &to_copy {
+                let date_created = backup.date_created;
+                let timestamp = DateTime::<DateTime<Utc>>::from_utc(NaiveDateTime::from_timestamp(date_created, 0), Utc).
+                    format("%Y-%m-%d.%H:%M:%S.%s").to_string();
+
+                let dest = [
+                    &self.ltfs_path, 
+                    &PathBuf::from("archive"),
+                    &PathBuf::from(
+                        self.db.file_stem().unwrap_or(&OsString::from("archive"))),
+                    &PathBuf::from(timestamp),
+
+                ].iter().collect::<PathBuf>();
+                match std::fs::create_dir_all(&dest) {
+                    Ok(()) => (),
+                    Err(e) => (),
+                }
+            }
+        }
+        else {
+            Err(eyre!("No backup found"))?;
+        }
         Ok(())
     }
 

@@ -18,9 +18,14 @@ lazy-regex = "*"
 which = "*"
 sysinfo = "*"
 rusqlite = "*"
-uuid = "*"
 stfu8 = "*"
 linked-hash-map = "*"
+chrono = "*"
+
+[dependencies.uuid]
+version = "*"
+features = [ "v4" ]
+
 
 #[profile.dev]
 #opt-level = 2
