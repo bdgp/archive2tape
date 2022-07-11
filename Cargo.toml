@@ -21,6 +21,9 @@ stfu8 = "*"
 chrono = "*"
 rand = "*"
 filetime = "*"
+linked-hash-map = "*"
+num_enum = "*"
+walkdir = "*"
 
 [dependencies.uuid]
 version = "*"
