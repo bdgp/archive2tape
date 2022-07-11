@@ -16,17 +16,17 @@ use duct::cmd;
 use lazy_static::lazy_static;
 use lazy_regex::{regex, regex_captures, regex_is_match, regex_replace};
 
-use shell_words;
 use which::which;
 
 use color_eyre::eyre::{Result,eyre};
 use rusqlite::{params, Connection};
 use sysinfo::{ProcessExt, System, SystemExt, Disk, DiskExt};
 use std::os::unix::ffi::OsStrExt;
-use linked_hash_map::LinkedHashMap;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use uuid::Uuid;
+use rand::{distributions::Alphanumeric, Rng};
+use filetime::{FileTime};
 
 
 // /dev/sg0 lto5 drive
@@ -513,7 +513,7 @@ impl Options {
         // initialize the backup set's sqlite database
         self.init_db()?;
         // make sure a non-full tape is ready for writing
-        let tape = self.ready_storage()?;
+        let mut tape = self.ready_storage()?;
 
         // use the glob patterns to produce a list of files
         // insert new_file records for each file entry
@@ -680,11 +680,13 @@ impl Options {
         }
         tx.rollback()?;
 
-        if let Some(backup) = backup {
-            for file in &to_copy {
+        if let Some(backup) = &backup {
+            if ! to_copy.is_empty() {
                 let date_created = backup.date_created;
-                let timestamp = DateTime::<DateTime<Utc>>::from_utc(NaiveDateTime::from_timestamp(date_created, 0), Utc).
-                    format("%Y-%m-%d.%H:%M:%S.%s").to_string();
+                let naive = NaiveDateTime::from_timestamp(date_created, 0);
+                let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
+                let newdate = datetime.format("%Y-%m-%d %H:%M:%S");
+                let timestamp = format!("{newdate}");
 
                 let dest = [
                     &self.ltfs_path, 
@@ -692,11 +694,80 @@ impl Options {
                     &PathBuf::from(
                         self.db.file_stem().unwrap_or(&OsString::from("archive"))),
                     &PathBuf::from(timestamp),
-
+                    &PathBuf::from(&backup.uuid),
                 ].iter().collect::<PathBuf>();
-                match std::fs::create_dir_all(&dest) {
-                    Ok(()) => (),
-                    Err(e) => (),
+                // if creating backup directories failed, maybe the tape ran out
+                // of space
+                if let Err(e)  = std::fs::create_dir_all(&dest) {
+                    if self.is_full()? {
+                        tape = self.ready_storage()?;
+                    }
+                    else {
+                        Err(e)?
+                    }
+                }
+                while ! to_copy.is_empty() {
+                    for file in &to_copy {
+                        if let Some(file_name) = file.path.file_name() {
+                            // create parent directories
+                            let dest_path = [
+                                &dest.as_path(), 
+                                &file.path.parent().unwrap_or(PathBuf::from("rootfs").as_path()),
+                                ].iter().collect::<PathBuf>();
+                            if let Err(e)  = std::fs::create_dir_all(&dest) {
+                                if self.is_full()? {
+                                    self.verify_files()?;
+                                    tape = self.ready_storage()?;
+                                }
+                                else {
+                                    Err(e)?
+                                }
+                            }
+                            // copy file to temp path first
+                            let randext = rand::thread_rng()
+                                .sample_iter(&Alphanumeric)
+                                .take(10)
+                                .map(char::from)
+                                .collect::<String>();
+                            let mut tmp_file_name = Vec::<u8>::new();
+                            tmp_file_name.extend(b".");
+                            tmp_file_name.extend(file_name.as_bytes());
+                            tmp_file_name.extend(b".");
+                            tmp_file_name.extend(randext.as_bytes());
+                            let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
+                            let tmp_file = [&dest_path, &tmp_file_name].iter().collect::<PathBuf>();
+                            let dest_file = [&dest_path, &PathBuf::from(file_name)].iter().collect::<PathBuf>();
+                            if let Err(e) = std::fs::copy(&file.path, tmp_file) {
+                                if self.is_full()? {
+                                    self.verify_files()?;
+                                    tape = self.ready_storage()?;
+                                }
+                                else {
+                                    Err(e)?
+                                }
+                            }
+                            // set the file's mtime
+                            if let Err(e) = filetime::set_file_mtime( tmp_file, FileTime::from_unix_time(file.mtime, 0)) {
+                                if self.is_full()? {
+                                    self.verify_files()?;
+                                    tape = self.ready_storage()?;
+                                }
+                                else {
+                                    Err(e)?
+                                }
+                            }
+                            // then move file into place
+                            if let Err(e) = std::fs::rename(&tmp_file, dest_file) {
+                                if self.is_full()? {
+                                    self.verify_files()?;
+                                    tape = self.ready_storage()?;
+                                }
+                                else {
+                                    Err(e)?
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
