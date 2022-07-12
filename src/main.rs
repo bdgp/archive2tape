@@ -35,7 +35,7 @@ use linked_hash_map::LinkedHashMap;
 // /dev/sg4 lto8 loader
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "archive2tape", about = "Incremental tape archiving tool")]
+#[structopt(name = "backup2tape", about = "Incremental tape archiving tool")]
 struct Options {
     //#[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/tape/by-id/scsi-35000e111c89b5001-nst")]
     #[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/sg2")]
@@ -52,7 +52,7 @@ struct Options {
     mkltfs: PathBuf,
     #[structopt(long = "umount", help = "Path to umount command", name="PATH", default_value="umount")]
     umount: PathBuf,
-    #[structopt(long = "db", help = "Path to SQLite archive metadata database", name="PATH")]
+    #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="PATH")]
     db: PathBuf,
     #[structopt(long = "tapes-db", help = "Path to SQLite tapes metadata database", name="PATH")]
     tapes_db: Option<PathBuf>,
@@ -62,8 +62,16 @@ struct Options {
     ltfs_path: PathBuf,
     #[structopt(long = "restore-path", help = "Restore path", name="PATH", default_value=".")]
     restore_path: PathBuf,
-    #[structopt(long = "restore", help = "Perform a restore instead of an archive")]
+    #[structopt(long = "backup", help = "Perform a backup")]
+    backup: bool,
+    #[structopt(long = "restore", help = "Perform a restore")]
     restore: bool,
+    #[structopt(long = "backup-id", help = "Backup ID to use for restore (default is latest backup)", name="ID")]
+    backup_id: Option<i64>,
+    #[structopt(long = "backup-uuid", help = "Backup UUID to use for restore (default is latest backup)", name="UUID")]
+    backup_uuid: Option<String>,
+    #[structopt(long = "backup-date", help = "Backup date to use for restore (default is latest backup)", name="DATETIME")]
+    backup_date: Option<String>,
     #[structopt(long = "tape", help = "List of tapes to use for backup and restore. If none specified, use any tapes", name="LABEL")]
     tapes: Vec<String>,
     #[structopt(long = "include", help = "Regex patterns to include files", name="REGEX")]
@@ -507,7 +515,7 @@ impl Options {
         Ok(())
     }
 
-    fn archive_files(&self) -> Result<()> {
+    fn backup_files(&self) -> Result<()> {
         // initialize the backup set's sqlite database
         self.init_db()?;
         let mut conn = Connection::open(&self.db)?;
@@ -752,9 +760,9 @@ impl Options {
 
                 let dest = [
                     &self.ltfs_path, 
-                    &PathBuf::from("archive"),
+                    &PathBuf::from("backup"),
                     &PathBuf::from(
-                        self.db.file_stem().unwrap_or(&OsString::from("archive"))),
+                        self.db.file_stem().unwrap_or(&OsString::from("backup"))),
                     &PathBuf::from(timestamp),
                     &PathBuf::from(&backup.uuid),
                 ].iter().collect::<PathBuf>();
@@ -968,7 +976,118 @@ impl Options {
     fn restore_files(&self) -> Result<()> {
         // initialize the backup set's sqlite database
         self.init_db()?;
+        let conn = Connection::open(&self.db)?;
 
+        // get the tape db records
+        let mut tapes = LinkedHashMap::<i64,Tape>::new();
+        {
+            let mut stmt = conn.prepare("select * from tape order by id")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let id: i64 = row.get(0)?;
+                tapes.insert(id, Tape{
+                    id: id,
+                    label: row.get(1)?,
+                    is_full: row.get(2)?,
+                    date_added: row.get(3)?,
+                });
+            }
+        }
+
+        // get the selected (or most recent if unspecified) backup record
+        let mut backup = Option::<Backup>::None;
+        {
+            let sql = format!(r#"
+            select * 
+            from backup 
+            where is_complete 
+              {where}
+            order by date_created desc nulls last limit 1
+            "#, where=if self.backup_id.is_some() || self.backup_uuid.is_some() || self.backup_date.is_some() 
+                {r#"and (id=?1 or uuid=?2 or date_created <= ?3)"#} 
+                else {""});
+            let mut stmt = conn.prepare(&sql)?;
+            let mut rows = if self.backup_id.is_some() || self.backup_uuid.is_some() || self.backup_date.is_some() {
+                let backup_date = self.backup_date.clone().map(|bd| 
+                    bd.parse::<dateparser::DateTimeUtc>().ok().map(|d| 
+                        d.0.timestamp())
+                    ).unwrap_or(None);
+                stmt.query(params![
+                    self.backup_id,
+                    self.backup_uuid,
+                    &backup_date,
+                ])?
+            } else {
+                stmt.query(params![])?
+            };
+            if let Some(row) = rows.next()? {
+                backup = Some(Backup {
+                    id: row.get(0)?,
+                    date_created: row.get(1)?,
+                    uuid: row.get(2)?,
+                    parent_backup_id: row.get(3)?,
+                    is_complete: row.get(4)?,
+                });
+            }
+        }
+
+        if let Some(backup) = backup {
+            // get the complete list of backup records from the db
+            let mut stmt = conn.prepare(r#"
+            with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
+                select id, date_created, uuid, parent_backup_id, 0 as depth
+                from backup
+                where is_complete and id = ?1
+                union all
+                select id, date_created, uuid, parent_backup_id, pb.depth+1 as depth
+                from backup b
+                join parent_backup pb 
+                    on pb.parent_backup_id = b.id
+                where b.is_complete) 
+            select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype
+            from (parent_backup pb
+                join backup2file b2f
+                on b2f.parent_backup_id = pb.id
+                join file f
+                on b2f.file_id=f.id)
+            join (parent_backup pb2
+                join backup2file b2f2
+                on b2f2.parent_backup_id=pb2.id
+                join file f2
+                on b2f2.file_id=f2.id)
+            on f.path=f2.path
+                and f.mtime=f2.mtime
+                and f.size=f2.size
+                and f.filetype=f2.filetype
+                and b2f.depth <= b2f2.depth
+            group by 1,2,3,4,5,6,7,8,9,10,11
+            having count(*)=1
+            order by f.tape_id nulls last, f.path nulls last
+            "#)?;
+            let mut old_tape_id = Option::<i64>::None;
+            let mut rows = stmt.query([&backup.id])?;
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(7)?;
+                let filetype: u8 = row.get(10)?;
+                let full_backup = FullBackup {
+                    backup_id: row.get(0)?,
+                    uid: row.get(1)?,
+                    gid: row.get(2)?,
+                    mode: row.get(3)?,
+                    is_deleted: row.get(4)?,
+                    file_id: row.get(5)?,
+                    tape_id: row.get(6)?,
+                    path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&path)?)),
+                    mtime: row.get(8)?,
+                    size: row.get(9)?,
+                    filetype: FileType::try_from(filetype)?,
+                };
+            }
+
+        }
+        else {
+            Err(eyre!("No backup found matching backup_id {backup_id:?}", backup_id=self.backup_id))?
+        }
         Ok(())
     }
 
@@ -1024,11 +1143,15 @@ fn main() -> Result<()> {
         Err(eyre!("Could not find restore path:: {restore_path}", restore_path=options.restore_path.display()))?
     }
 
-    if options.restore {
+    if options.restore && !options.backup{
         options.restore_files()?;
     }
+    else if options.backup && !options.restore {
+        options.backup_files()?;
+    }
     else {
-        options.archive_files()?;
+        eprintln!("Must specify one of: --backup, --restore");
+        std::process::exit(1);
     }
 
     Ok(())

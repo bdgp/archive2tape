@@ -24,6 +24,7 @@ filetime = "*"
 linked-hash-map = "*"
 num_enum = "*"
 walkdir = "*"
+dateparser = "*"
 
 [dependencies.uuid]
 version = "*"
