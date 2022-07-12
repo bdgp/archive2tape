@@ -29,11 +29,12 @@ nix = "*"
 csv = "*"
 file-mode = "*"
 users = "*"
+log = "*"
+flexi_logger = "*"
 
 [dependencies.uuid]
 version = "*"
 features = [ "v4" ]
-
 
 #[profile.dev]
 #opt-level = 2

@@ -31,6 +31,9 @@ use nix::sys::stat::Mode;
 use nix::unistd::{Uid,Gid};
 use users::{Users, Groups};
 
+use log::{info, debug};
+use flexi_logger::Logger;
+
 // /dev/sg0 lto5 drive
 // /dev/sg1 lto5 loader
 // /dev/sg2 lto8 drive
@@ -96,7 +99,7 @@ enum Command {
     ListFiles(ListFilesCmd),
 }
 
-#[derive(StructOpt)]
+#[derive(StructOpt, Debug)]
 #[structopt(name = "backup2tape", about = "Incremental tape archiving tool")]
 struct Options {
     //#[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/tape/by-id/scsi-35000e111c89b5001-nst")]
@@ -237,9 +240,11 @@ impl Options {
     // Storage Element (\d+) IMPORT.EXPORT:Empty/ && print "I:$1:E\n";
     // Storage Element (\d+) IMPORT.EXPORT:Full( :VolumeTag=(.+))?/ && print "I:$1:F:$3\n";' ${TMPFILE}
     fn loader_status(&self) -> Result<Vec<StorageElement>> {
+        debug!("Running loader_status");
         let mut elements = Vec::<StorageElement>::new();
         // mtx -f /dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0 status
         let mtx_cmd = cmd!(&self.mtx, "-f", &self.loader, "status").run()?;
+        debug!("mtx_cmd: {mtx_cmd:?}");
         let code = match mtx_cmd.status.code() {
             Some(c) => c.to_string(),
             _ => "null".to_string(),
@@ -249,69 +254,88 @@ impl Options {
         }
         for line in mtx_cmd.stdout.lines() {
             let line = line?;
+            debug!("mtx line: {line}");
             if let Some((_, drive_num)) = regex_captures!(r#"^\s*Data Transfer Element (\d+):Empty$"#, &line) {
-                elements.push(StorageElement {
+                let element = StorageElement {
                     index: drive_num.parse::<usize>()?,
                     label: None,
                     storage_type: StorageType::Drive,
                     status: StorageStatus::Empty,
                     storage_element_index: None,
-                });
+                };
+                debug!("{element:?}");
+                elements.push(element);
             }
             else if let Some((_, drive_num, storage_element_index, _, label)) = regex_captures!(r#"^\s*Data Transfer Element (\d+):Full \(Storage Element (\d+) Loaded\)(:VolumeTag =\s*(.+))?$"#, &line) {
-                elements.push(StorageElement {
+                let element = StorageElement {
                     index: drive_num.parse::<usize>()?,
                     label: Some(label.to_string()),
                     storage_type: StorageType::Drive,
                     status: StorageStatus::Full,
                     storage_element_index: Some(storage_element_index.parse::<usize>()?),
-                });
+                };
+                debug!("{element:?}");
+                elements.push(element);
             }
             else if let Some((_, storage_element_index,)) = regex_captures!(r#"^\s*Storage Element (\d+):Empty$"#, &line) {
-                elements.push(StorageElement {
+                let element = StorageElement {
                     index: storage_element_index.parse::<usize>()?,
                     label: None,
                     storage_type: StorageType::Element,
                     status: StorageStatus::Empty,
                     storage_element_index: Some(storage_element_index.parse::<usize>()?),
-                });
+                };
+                debug!("{element:?}");
+                elements.push(element);
             }
             else if let Some((_, storage_element_index, _, label)) = regex_captures!(r#"^\s*Storage Element (\d+):Full( :VolumeTag=(.+))?$"#, &line) {
-                elements.push(StorageElement {
+                let element = StorageElement {
                     index: storage_element_index.parse::<usize>()?,
                     label: Some(label.to_string()),
                     storage_type: StorageType::Element,
                     status: StorageStatus::Full,
                     storage_element_index: Some(storage_element_index.parse::<usize>()?),
-                });
+                };
+                debug!("{element:?}");
+                elements.push(element);
             }
             else if let Some((_, storage_element_index,)) = regex_captures!(r#"^\s*Storage Element (\d+) IMPORT.EXPORT:Empty$"#, &line) {
-                elements.push(StorageElement {
+                let element = StorageElement {
                     index: storage_element_index.parse::<usize>()?,
                     label: None,
                     storage_type: StorageType::ImportExport,
                     status: StorageStatus::Empty,
                     storage_element_index: Some(storage_element_index.parse::<usize>()?),
-                });
+                };
+                debug!("{element:?}");
+                elements.push(element);
             }
             else if let Some((_, storage_element_index, _, label)) = regex_captures!(r#"^\s*Storage Element (\d+) IMPORT.EXPORT:Full( :VolumeTag=(.+))?$"#, &line) {
-                elements.push(StorageElement {
+                let element = StorageElement {
                     index: storage_element_index.parse::<usize>()?,
                     label: Some(label.to_string()),
                     storage_type: StorageType::ImportExport,
                     status: StorageStatus::Full,
                     storage_element_index: Some(storage_element_index.parse::<usize>()?),
-                });
+                };
+                debug!("{element:?}");
+                elements.push(element);
             }
         }
+        debug!("elements: {elements:?}");
         Ok(elements)
     }
 
     fn is_mounted(&self) -> Result<bool> {
+        debug!("Running is_mounted");
         let mut system = sysinfo::System::new();
         system.refresh_disks_list();
         for disk in system.disks() {
+            debug!("Checking disk {disk} against {ltfs_path}", 
+                disk=disk.mount_point().to_string_lossy(),
+                ltfs_path=self.ltfs_path.to_string_lossy());
             if disk.mount_point() == self.ltfs_path {
+                debug!("Found match");
                 return Ok(true);
             }
         }
@@ -319,10 +343,15 @@ impl Options {
     }
 
     fn is_tape_full(&self) -> Result<bool> {
+        debug!("Running is_tape_full");
         let mut system = sysinfo::System::new();
         system.refresh_disks_list();
         for disk in system.disks_mut() {
+            debug!("Checking disk {disk} against {ltfs_path}", 
+                disk=disk.mount_point().display(),
+                ltfs_path=self.ltfs_path.display());
             if disk.mount_point() == self.ltfs_path {
+                debug!("Found match, available_space = {}", disk.available_space());
                 return Ok(disk.available_space() == 0);
             }
         }
@@ -330,8 +359,10 @@ impl Options {
     }
 
     fn tape_status(&self) -> Result<Vec<Tape>> {
+        debug!("Running tape_status");
         let mut tapes = Vec::<Tape>::new();
         if let Some(tapes_db) = &self.tapes_db {
+            debug!("connecting to tapes_db {tapes_db}", tapes_db=tapes_db.display());
             let conn = Connection::open(tapes_db)?;
 
             let mut stmt = conn.prepare("select * from tape")?;
@@ -348,58 +379,77 @@ impl Options {
                 tapes.push(tape);
             }
         }
+        debug!("Got tapes: {tapes:?}");
         Ok(tapes)
     }
 
     fn insert_tape_record(&self, label: &str) -> Result<()> {
+        debug!("Running insert_tape_record");
         if let Some(tapes_db) = &self.tapes_db {
+            debug!("Loading tapes db {}", tapes_db.display());
             let conn = Connection::open(tapes_db)?;
+            debug!("Inserting tape record {label}");
             conn.execute(r#"insert into tape (label) values (?1) on conflict(label) do nothing "#, params![label])?;
         }
+        debug!("Loading metadata db {}", &self.db.display());
         let conn = Connection::open(&self.db)?;
+        debug!("Inserting tape record {label}");
         conn.execute(r#"insert into tape (label) values (?1) on conflict(label) do nothing"#, params![label])?;
         Ok(())
     }
 
     fn set_tape_record_as_full(&self, label: &str) -> Result<()> {
+        debug!("Running set_tape_record_as_full");
         if let Some(tapes_db) = &self.tapes_db {
             let conn = Connection::open(tapes_db)?;
+            debug!("Setting tape {label} as full");
             conn.execute(r#"update tape set is_full=1 where label=?1"#, params![label])?;
         }
+        debug!("Loading metadata db {}", &self.db.display());
         let conn = Connection::open(&self.db)?;
+        debug!("Setting tape {label} as full");
         conn.execute(r#"update tape set is_full=1 where label=?1"#, params![label])?;
         Ok(())
     }
 
     fn wait_for_drive(&self) -> Result<()> {
+        debug!("Running wait_for_drive");
         let mut drive_is_ready = false;
         for _ in 0..300 {
-            let drivestatus = cmd!("mt","-f", &self.drive, "status").run()?;
+            let cmd = cmd!("mt","-f", &self.drive, "status");
+            debug!("Running mt command: {cmd:?}");
+            let drivestatus = cmd.run()?;
             if regex_is_match!(r#"ONLINE"#B, &drivestatus.stdout) {
+                debug!("Drive is ready");
                 drive_is_ready = true;
                 break
             }
+            debug!("Waiting 1 second...");
             std::thread::sleep(std::time::Duration::new(1, 0));
         }
         if ! drive_is_ready {
-            let drivestatus = cmd!("mt","-f", &self.drive, "status").run()?;
-            if ! regex_is_match!(r#"ONLINE"#B, &drivestatus.stdout) {
-                Err(eyre!("Drive not ready!"))?
-            }
+            Err(eyre!("Drive not ready!"))?
         }
         Ok(())
     }
 
     fn wait_for_ltfs_process_to_terminate(&self) -> Result<()> {
+        debug!("Running wait_for_ltfs_process_to_terminate");
         let mut system = sysinfo::System::new();
         for _ in 0..600 {
+            debug!("Refreshing processes");
             system.refresh_processes();
             let mut found_ltfs = false;
             for (_pid, process) in system.processes() {
+                debug!("Checking process: {process:?} with name \"{name}\", exe \"{exe}\", cmd \"{cmd:?}\"",
+                    name=process.name(),
+                    exe=process.exe().to_string_lossy(),
+                    cmd=process.cmd());
                 if process.name() == "ltfs" || 
                     regex_is_match!(r#"(^|/)ltfs$"#, &process.exe().to_string_lossy()) ||
                     regex_is_match!(r#"(^|/)ltfs$"#, &process.cmd()[0])
                 {
+                    debug!("Found matching process");
                     found_ltfs = true;
                     break;
                 }
@@ -407,49 +457,68 @@ impl Options {
             if !found_ltfs {
                 return Ok(())
             }
+            debug!("Waiting 1 second...");
             std::thread::sleep(std::time::Duration::new(1, 0));
         }
-        Err(eyre!("ltfs process took too long to terminate"))
+        Err(eyre!("ltfs process took too long to terminate"))?
     }
 
     fn unmount_tape(&self) -> Result<()> {
+        debug!("Running unmount_tape");
         if self.is_mounted()? {
-            cmd!(&self.umount, &self.ltfs_path).run()?;
+            let cmd = cmd!(&self.umount, &self.ltfs_path);
+            debug!("Running unmount command: {cmd:?}");
+            cmd.run()?;
             self.wait_for_ltfs_process_to_terminate()?;
         }
         Ok(())
     }
 
     fn load_tape(&self, slot: usize) -> Result<()> {
+        debug!("Running load_tape");
         let ls = self.loader_status()?;
         let drive_slot = ls.iter().
             filter(|se| se.storage_type==StorageType::Drive).
             next().ok_or(eyre!("Could not find drive slot"))?;
+        debug!("Found drive slot: {drive_slot:?}");
 
         if drive_slot.status == StorageStatus::Full {
+            debug!("Drive slot is full");
             let empty_slot = ls.iter().
                 filter(|se| se.storage_type==StorageType::Drive && se.status==StorageStatus::Empty).
                 next().ok_or(eyre!("Could not find an empty slot"))?;
+            debug!("Found empty slot: {empty_slot:?}");
             
             self.unmount_tape()?;
-            cmd!(&self.mtx, "-f", &self.loader, "unload", empty_slot.index.to_string(), drive_slot.index.to_string()).run()?;
+            let cmd = cmd!(&self.mtx, "-f", &self.loader, "unload", empty_slot.index.to_string(), drive_slot.index.to_string());
+            debug!("Running unload commmand: {cmd:?}");
+            cmd.run()?;
         }
-        cmd!(&self.mtx, "-f", &self.loader, "load", slot.to_string(), drive_slot.index.to_string()).run()?;
+        let cmd = cmd!(&self.mtx, "-f", &self.loader, "load", slot.to_string(), drive_slot.index.to_string());
+        debug!("Running load commmand: {cmd:?}");
+        cmd.run()?;
         self.wait_for_drive()?;
         Ok(())
     }
 
     fn mount_tape(&self) -> Result<()> {
+        debug!("Running mount_tape");
         if ! self.is_mounted()? {
-            cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.drive.to_string_lossy()), &self.ltfs_path).run()?;
+            let cmd = cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.drive.to_string_lossy()), &self.ltfs_path);
+            debug!("Running ltfs commmand: {cmd:?}");
+            cmd.run()?;
             if ! self.is_mounted()? {
                 Err(eyre!("path {ltfs_path} was not mounted", ltfs_path=self.ltfs_path.display()))?;
             }
+        }
+        else {
+            debug!("LTFS is already mounted");
         }
         Ok(())
     }
 
     fn ready_storage(&self) -> Result<StorageElement> {
+        debug!("Running ready_storage");
         // get loader status
         let ls = self.loader_status()?;
         // get tape status from tapes db
@@ -458,9 +527,11 @@ impl Options {
         let full_tapes = ts.iter().
             filter(|t| t.is_full).
             map(|t| t.label.clone()).collect::<HashSet<_>>();
+        debug!("Got full tapes from db: {full_tapes:?}");
         let non_full_tapes = ts.iter().
             filter(|t| !t.is_full).
             map(|t| t.label.clone()).collect::<HashSet<_>>();
+        debug!("Got non-full tapes from db: {non_full_tapes:?}");
 
         let mut tapes = ls.iter().
             filter(|se| 
@@ -472,25 +543,36 @@ impl Options {
             (!(if let Some(label) = &t.label {non_full_tapes.contains(label)} else {false}), 
             &t.storage_type,
             &t.label));
+        debug!("Got usable tapes: {tapes:?}");
 
         // find a tape to use
+        debug!("Find a tape to use");
         for tape in &tapes {
+            debug!("Checking tape: {tape:?}");
             if tape.storage_type == StorageType::Element || tape.storage_type == StorageType::Drive {
                 if let Some(label) = &tape.label {
                     // if the tape is not marked as full
                     if ! full_tapes.contains(label) && ! self.ignore_tape.is_match(label) {
                         if tape.storage_type != StorageType::Drive {
                             // load the tape into the drive
+                            debug!("Loading usable tape: {tape:?}");
                             self.load_tape(tape.index)?;
                         }
 
                         // if no db record exists for tape, attempt to format the tape
                         // if tape is already formatted, formatting will fail
                         if !non_full_tapes.contains(label) {
-                            let output = cmd!(&self.mkltfs, "-d", &self.drive).unchecked().run()?;
+                            let cmd = cmd!(&self.mkltfs, "-d", &self.drive).unchecked();
+                            debug!("Tape has no db record, try formatting it");
+                            debug!("Running mkltfs commmand: {cmd:?}");
+                            let output = cmd.run()?;
                             match output.status.code() {
-                                Some(16) => (), // already formatted
-                                Some(0) => (), // format succeeded
+                                Some(16) => {
+                                    debug!("mkltfs returned exit code 16, already formatted");
+                                }, // already formatted
+                                Some(0) => {
+                                    debug!("mkltfs format succeeded");
+                                }, // format succeeded
                                 code => Err(eyre!("mkltfs command returned exit status {code:?}"))?,
                             }
                             // insert a db record for the tape
@@ -513,13 +595,15 @@ impl Options {
                 }
             }
         }
-        Err(eyre!("Could not find any available tapes to use"))
+        Err(eyre!("Could not find any available tapes to use"))?
     }
 
     fn init_db(&self) -> Result<()> {
+        debug!("Called init_db");
+        debug!("Connecting to db {db}", db=self.db.display());
         let conn = Connection::open(&self.db)?;
 
-        conn.execute_batch(r#"
+        let sql = r#"
         create table if not exists tape (
             id integer primary key autoincrement not null,
             label text not null unique,
@@ -549,24 +633,30 @@ impl Options {
             mode integer not null,
             is_deleted integer not null
         );
-        "#)?;
+        "#;
+        debug!("Running sql:\n{sql}\n");
+        conn.execute_batch(sql)?;
 
         if let Some(tapes_db) = &self.tapes_db {
+            debug!("Connecting to tapes db {tapes_db}", tapes_db=tapes_db.display());
             let conn = Connection::open(tapes_db)?;
-            conn.execute_batch(r#"
+            let sql = r#"
             create table if not exists tape (
                 id integer primary key autoincrement not null,
                 label text not null unique,
                 is_full integer default false not null,
                 date_added timestamp default current_timestamp not null
             )
-            "#)?;
+            "#;
+            debug!("Running sql:\n{sql}\n");
+            conn.execute_batch(sql)?;
         }
 
         Ok(())
     }
 
     fn backup_files(&self) -> Result<()> {
+        debug!("Called backup_files");
         let backup_cmd = match &self.cmd {
             Some(Command::Backup(b)) => b,
             _ => Err(eyre!("Couldn't match backup subcommand!"))?,
@@ -574,6 +664,7 @@ impl Options {
 
         // initialize the backup set's sqlite database
         self.init_db()?;
+        debug!("Connecting to db {db}", db=self.db.display());
         let mut conn = Connection::open(&self.db)?;
 
         // get the tape db records
@@ -591,22 +682,28 @@ impl Options {
                 });
             }
         }
+        debug!("got tapes records: {tapes:?}");
 
         // get the parent backup ID
         let mut parent_backup_id = Option::<i64>::None;
         {
-            let mut stmt = conn.prepare(r#"select id from backup where is_complete order by date_created desc nulls last limit 1"#)?;
+            let sql = r#"select id from backup where is_complete order by date_created desc nulls last limit 1"#;
+            debug!("Running query: {sql}");
+            let mut stmt = conn.prepare(sql)?;
             let mut rows = stmt.query([])?;
             if let Some(row) = rows.next()? {
                 parent_backup_id = Some(row.get(0)?);
             }
         }
+        debug!("got parent backup id {parent_backup_id:?}");
 
         // create the new backup record
         let mut backup = None;
         let backup_uuid = Uuid::new_v4();
         {
-            let mut stmt = conn.prepare(r#"insert into backup (uuid,parent_backup_id) values (?1,?2) returning *"#)?;
+            let sql = r#"insert into backup (uuid,parent_backup_id) values (?1,?2) returning *"#;
+            debug!("Running query: {sql}");
+            let mut stmt = conn.prepare(sql)?;
             let mut rows = stmt.query(params![backup_uuid.to_string(), parent_backup_id])?;
             if let Some(row) = rows.next()? {
                 parent_backup_id = Some(row.get(0)?);
@@ -619,13 +716,15 @@ impl Options {
                 });
             }
         }
+        debug!("Created backup record: {backup:?}");
 
         // compute the backup diffs
+        debug!("Computing backup diffs");
         let mut backup_diffs = Vec::<BackupDiff>::new();
         let mut to_copy = LinkedHashMap::<PathBuf,NewFile>::new();
         {
             let tx = conn.transaction()?;
-            tx.execute_batch(r#"
+            let sql =r#"
                     drop table if exists new_file;
                     create table new_file (
                         id integer primary key autoincrement not null,
@@ -638,9 +737,14 @@ impl Options {
                         filetype integer not null,
                         symlink_target text,
                     );
-            "#)?;
+            "#;
+            debug!("Running sql query:\n{sql}\n");
+            tx.execute_batch(sql)?;
             {
-                let mut stmt = tx.prepare("insert into new_file (path,mtime,size,uid,gid,mode,filetype,symlink_target) values (?1,?2,?3,?4,?5,?6,?7,?8)")?;
+                debug!("Inserting new_file records");
+                let sql = "insert into new_file (path,mtime,size,uid,gid,mode,filetype,symlink_target) values (?1,?2,?3,?4,?5,?6,?7,?8)";
+                let mut stmt = tx.prepare(sql)?;
+                let mut count = 0;
                 // use the glob patterns to produce a list of files
                 for g in &backup_cmd.patterns {
                     'ENTRY:
@@ -682,12 +786,16 @@ impl Options {
                             (if entry.is_dir() {FileType::Directory} else if entry.is_symlink() {FileType::Symlink} else {FileType::File}) as u8,
                             if entry.is_symlink() {Some(stfu8::encode_u8_pretty(std::fs::read_link(&entry)?.as_os_str().as_bytes()))} else {None},
                         ])?;
+                        count += 1;
+                        if count % 1000 == 0 {
+                            debug!("Inserted {count} records");
+                        }
                     }
                 }
             }
             {
                 // get the complete list of backup diffs from the db
-                let mut stmt = tx.prepare(r#"
+                let sql = r#"
                 with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
                     select id, date_created, uuid, parent_backup_id, 0 as depth
                     from backup
@@ -727,7 +835,9 @@ impl Options {
                 where ((fb.path is null or fb.is_deleted) and nf.path is not null)
                 or (fb.path is not null and nf.path is null)
                 order by nf.path nulls last, fb.path nulls last
-                "#)?;
+                "#;
+                debug!("Running sql:\n{sql}\n");
+                let mut stmt = tx.prepare(sql)?;
                 let mut rows = stmt.query([parent_backup_id])?;
                 while let Some(row) = rows.next()? {
                     let path: Option<String> = row.get(1)?;
@@ -773,11 +883,13 @@ impl Options {
             }
             tx.rollback()?;
         }
+        debug!("Found {} backup_diff records, {} to_copy records", backup_diffs.len(), to_copy.len());
 
         if let Some(backup) = &backup {
             {
                 let tx = conn.transaction()?;
                 {
+                    let mut count = 0;
                     let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (?1,?2,?3,?4,?5,?6)"#)?;
                     for backup_diff in &backup_diffs {
                         if let Some(full_backup) = &backup_diff.full_backup {
@@ -793,6 +905,7 @@ impl Options {
                                     new_file.mode,
                                     is_deleted,
                                 ])?;
+                                count += 1;
                             }
                             // create a deletion record
                             else {
@@ -805,9 +918,11 @@ impl Options {
                                     full_backup.mode,
                                     is_deleted,
                                 ])?;
+                                count += 1;
                             }
                         }
                     }
+                    debug!("Inserted {count} backup2file diff records");
                 }
                 tx.commit()?;
             }
@@ -819,6 +934,7 @@ impl Options {
                 let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
                 let newdate = datetime.format("%Y-%m-%d %H:%M:%S");
                 let timestamp = format!("{newdate}");
+                debug!("timestamp={timestamp}");
 
                 let dest = [
                     &self.ltfs_path, 
@@ -829,10 +945,16 @@ impl Options {
                     &PathBuf::from(&backup.uuid),
                     &PathBuf::from("rootfs"),
                 ].iter().collect::<PathBuf>();
+                debug!("dest={dest}", dest=dest.to_string_lossy());
 
                 let mut verified_files = Vec::<PathBuf>::new();
+                let mut old_tape = Option::<String>::None;
                 while ! to_copy.is_empty() {
                     let tape = self.ready_storage()?;
+                    if old_tape != tape.label {
+                        debug!("Using tape {label:?}", label=tape.label);
+                        old_tape = tape.label.clone();
+                    }
                     let mut tape_full = false;
                     let mut old_dir = Option::<(PathBuf, i64)>::None;
                     for (_, file) in &to_copy {
@@ -863,6 +985,7 @@ impl Options {
                                         &dest,
                                         &file.path,
                                     ].iter().collect::<PathBuf>();
+                                    info!("{path}/ -> {destdir}/", path=file.path.to_string_lossy(), destdir=destdir.to_string_lossy());
                                     // create the directory
                                     if let Err(e) = std::fs::create_dir(&destdir) {
                                         if self.is_tape_full()? {
@@ -879,7 +1002,9 @@ impl Options {
                                 FileType::Symlink => {
                                     // create the symlink
                                     let dest_file = [&dest_path, &PathBuf::from(file_name)].iter().collect::<PathBuf>();
-                                    if let Err(e) = std::os::unix::fs::symlink(std::fs::read_link(&file.path)?, &dest_file) {
+                                    let target = std::fs::read_link(&file.path)?;
+                                    info!("{path} -> {dest_file} ({target})", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy(), target=target.to_string_lossy());
+                                    if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
                                         if self.is_tape_full()? {
                                             tape_full = true;
                                             break;
@@ -915,6 +1040,7 @@ impl Options {
                                     let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
                                     let tmp_file = [&dest_path, &tmp_file_name].iter().collect::<PathBuf>();
                                     let dest_file = [&dest_path, &PathBuf::from(file_name)].iter().collect::<PathBuf>();
+                                    info!("{path} -> {dest_file}", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy());
                                     if let Err(e) = std::fs::copy(&file.path, &tmp_file) {
                                         if self.is_tape_full()? {
                                             tape_full = true;
@@ -967,6 +1093,7 @@ impl Options {
                     if ! tape_full {
                         verified_files = to_copy.keys().map(|k| k.clone()).collect();
                         to_copy.clear();
+                        debug!("Transferred {} files", verified_files.len());
                     }
                     // otherwise, the tape has become full. 
                     // we need to re-mount the filesystem to ensure we're using the most 
@@ -974,6 +1101,7 @@ impl Options {
                     // scan the ltfs filesystem to verify which files actually
                     // were transferred successfully.
                     else {
+                        debug!("The tape became full, re-mounting LTFS and verifying files");
                         self.unmount_tape()?;
                         self.mount_tape()?;
 
@@ -989,6 +1117,7 @@ impl Options {
                                 verified_files.push(p.path.clone());
                             }
                         }
+                        debug!("Found {} verified files", verified_files.len());
                     }
                     if ! verified_files.is_empty() {
                         let tx = conn.transaction()?;
@@ -1027,12 +1156,15 @@ impl Options {
                             }
                         }
                         tx.commit()?;
+                        debug!("Finished creating file records for {} files", verified_files.len());
                         verified_files.clear();
                     }
                 }
             }
             // set the backup complete flag in the db
-            conn.execute(r#"update backup set is_complete=true where backup_id=?1"#, params![&backup.id])?;
+            let sql = r#"update backup set is_complete=true where backup_id=?1"#;
+            debug!("Running sql update:\n{sql}\n");
+            conn.execute(sql, params![&backup.id])?;
         }
         else {
             Err(eyre!("No backup found"))?;
@@ -1041,6 +1173,7 @@ impl Options {
     }
 
     fn restore_files(&self) -> Result<()> {
+        debug!("Running restore_files");
         let restore_cmd = match &self.cmd {
             Some(Command::Restore(r)) => r,
             _ => Err(eyre!("Couldn't match restore subcommand!"))?,
@@ -1048,15 +1181,19 @@ impl Options {
         if ! restore_cmd.restore_path.is_dir() {
             Err(eyre!("Could not find restore path: {restore_path}", restore_path=restore_cmd.restore_path.to_string_lossy()))?
         }
+        debug!("Using restore_path: {}", restore_cmd.restore_path.to_string_lossy());
 
         // initialize the backup set's sqlite database
         self.init_db()?;
+        debug!("Connecting to db {db}", db=&self.db.to_string_lossy());
         let conn = Connection::open(&self.db)?;
 
         // get the tape db records
         let mut tapes = LinkedHashMap::<i64,Tape>::new();
         {
-            let mut stmt = conn.prepare("select * from tape order by id")?;
+            let sql = "select * from tape order by id";
+            debug!("Running query: {sql}");
+            let mut stmt = conn.prepare(sql)?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let id: i64 = row.get(0)?;
@@ -1068,6 +1205,7 @@ impl Options {
                 });
             }
         }
+        debug!("Found tapes db records: {tapes:?}");
 
         // get the selected (or most recent if unspecified) backup record
         let mut backup = Option::<Backup>::None;
@@ -1081,6 +1219,7 @@ impl Options {
             "#, where=if restore_cmd.backup_id.is_some() || restore_cmd.backup_uuid.is_some() || restore_cmd.backup_date.is_some() 
                 {r#"and (id=?1 or uuid=?2 or date_created <= ?3)"#} 
                 else {""});
+            debug!("Running query: {sql}");
             let mut stmt = conn.prepare(&sql)?;
             let mut rows = if restore_cmd.backup_id.is_some() || restore_cmd.backup_uuid.is_some() || restore_cmd.backup_date.is_some() {
                 let backup_date = restore_cmd.backup_date.clone().map(|bd| 
@@ -1107,11 +1246,13 @@ impl Options {
         }
 
         if let Some(backup) = backup {
+            debug!("Found backup record: {backup:?}");
             let date_created = backup.date_created;
             let naive = NaiveDateTime::from_timestamp(date_created, 0);
             let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
             let newdate = datetime.format("%Y-%m-%d %H:%M:%S");
             let timestamp = format!("{newdate}");
+            debug!("timestamp={timestamp}");
 
             let source_path = [
                 &self.ltfs_path, 
@@ -1122,9 +1263,10 @@ impl Options {
                 &PathBuf::from(&backup.uuid),
                 &PathBuf::from("rootfs"),
             ].iter().collect::<PathBuf>();
+            debug!("source_path={source_path}", source_path=source_path.to_string_lossy());
 
             // get the complete list of backup records from the db
-            let mut stmt = conn.prepare(r#"
+            let sql = r#"
             with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
                 select id, date_created, uuid, parent_backup_id, 0 as depth
                 from backup
@@ -1154,7 +1296,9 @@ impl Options {
             group by 1,2,3,4,5,6,7,8,9,10,11,12
             having count(*)=1
             order by f.tape_id nulls last, f.path nulls last
-            "#)?;
+            "#;
+            debug!("Running sql query:\n{sql}\n");
+            let mut stmt = conn.prepare(sql)?;
             let mut old_tape_id = Option::<i64>::None;
             let mut old_dir = Option::<(PathBuf, i64)>::None;
             let mut rows = stmt.query([&backup.id])?;
@@ -1174,7 +1318,7 @@ impl Options {
                     mtime: row.get(8)?,
                     size: row.get(9)?,
                     filetype: FileType::try_from(filetype)?,
-                    symlink_target: if let Some(s) = symlink_target {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&path)?)))} else {None},
+                    symlink_target: if let Some(s) = symlink_target {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&s)?)))} else {None},
                 };
                 if ! restore_cmd.patterns.is_empty() {
                     let mut found_match = false;
@@ -1200,6 +1344,7 @@ impl Options {
                         if let Some(tape) = tapes.get(&full_backup.tape_id) {
                             let ls = self.loader_status()?;
                             if let Some(se) = ls.iter().filter(|se| if let Some(label) = &se.label {*label==tape.label} else {false}).next() {
+                                debug!("Loading tape {label}", label=&tape.label);
                                 self.unmount_tape()?;
                                 self.load_tape(se.index)?;
                                 self.mount_tape()?;
@@ -1238,6 +1383,7 @@ impl Options {
                 }
                 match full_backup.filetype {
                     FileType::Directory => {
+                        info!("{source}/ -> {dest}/", source=source.to_string_lossy(), dest=dest.to_string_lossy());
                         nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode))?;
                         nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
                         let mut mtime = full_backup.mtime;
@@ -1255,6 +1401,7 @@ impl Options {
                             Err(eyre!("Destination {dest} is a directory instead of a symlink!", dest=dest.to_string_lossy()))?;
                         }
                         let target = full_backup.symlink_target.ok_or_else(|| eyre!("Symlink target is null!"))?;
+                        info!("{source} -> {dest} ({target})", source=source.to_string_lossy(), dest=dest.to_string_lossy(), target=target.to_string_lossy());
                         std::os::unix::fs::symlink(&target, &dest)?;
                         nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
                         let filetime = FileTime::from_unix_time(full_backup.mtime, 0);
@@ -1285,6 +1432,7 @@ impl Options {
                                 let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
                                 let tmp_file = [&PathBuf::from(dest_path), &tmp_file_name].iter().collect::<PathBuf>();
 
+                                info!("{source} -> {dest}", source=source.to_string_lossy(), dest=dest.to_string_lossy());
                                 // copy the file
                                 std::fs::copy(&source, &tmp_file)?;
                                 // set uid:gid
@@ -1312,6 +1460,7 @@ impl Options {
     }
 
     fn list_backups(&self) -> Result<()> {
+        debug!("Running list_backups");
         let cmd = match &self.cmd {
             Some(Command::ListBackups(l)) => l,
             _ => Err(eyre!("Couldn't match subcommand!"))?,
@@ -1321,6 +1470,7 @@ impl Options {
             map(|p| PathBuf::from(p)).
             or_else(|| which("pspg").ok()).
             or_else(|| which("less").ok());
+        debug!("Using pager: {pager:?}");
         let mut process = if let Some(pager) = pager {
             Some(std::process::Command::new(pager).
                 stdin(std::process::Stdio::piped()).
@@ -1339,6 +1489,7 @@ impl Options {
         let mut csv_writer = csv::Writer::from_writer(writer);
 
         self.init_db()?;
+        debug!("Connecting to database {db}", db=self.db.to_string_lossy());
         let conn = Connection::open(&self.db)?;
         {
             let sql = format!(r#"
@@ -1349,6 +1500,7 @@ impl Options {
             "#, where=if cmd.backup_id.is_some() || cmd.backup_uuid.is_some() || cmd.backup_date.is_some() 
                 {r#"where (id=?1 or uuid=?2 or date_created <= ?3)"#} 
                 else {""});
+            debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(&sql)?;
             let cols = stmt.column_names().iter().map(|c| c.to_string()).collect::<Vec<_>>();
             let mut rows = if cmd.backup_id.is_some() || cmd.backup_uuid.is_some() || cmd.backup_date.is_some() {
@@ -1380,6 +1532,7 @@ impl Options {
     }
 
     fn list_files(&self) -> Result<()> {
+        debug!("Running list_files");
         let cmd = match &self.cmd {
             Some(Command::ListFiles(l)) => l,
             _ => Err(eyre!("Couldn't match subcommand!"))?,
@@ -1389,6 +1542,7 @@ impl Options {
             map(|p| PathBuf::from(p)).
             or_else(|| which("pspg").ok()).
             or_else(|| which("less").ok());
+        debug!("Using pager: {pager:?}");
         let mut process = if let Some(pager) = pager {
             Some(std::process::Command::new(pager).
                 stdin(std::process::Stdio::piped()).
@@ -1407,6 +1561,7 @@ impl Options {
         let mut csv_writer = csv::Writer::from_writer(writer);
 
         self.init_db()?;
+        debug!("Connecting to database {db}", db=self.db.to_string_lossy());
         let conn = Connection::open(&self.db)?;
 
         // get the tape db records
@@ -1424,6 +1579,7 @@ impl Options {
                 });
             }
         }
+        debug!("got tapes db records: {tapes:?}");
 
         let mut backup = Option::<Backup>::None;
         {
@@ -1465,7 +1621,8 @@ impl Options {
         }
         let cache = users::UsersCache::new();
         if let Some(backup) = backup {
-            let mut stmt = conn.prepare(r#"
+            debug!("Using backup record: {backup:?}");
+            let sql = r#"
             with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
                 select id, date_created, uuid, parent_backup_id, 0 as depth
                 from backup
@@ -1495,7 +1652,9 @@ impl Options {
             group by 1,2,3,4,5,6,7,8,9,10,11,12
             having count(*)=1
             order by f.path nulls last
-            "#)?;
+            "#;
+            debug!("Running sql query:\n{sql}\n");
+            let mut stmt = conn.prepare(sql)?;
             let mut rows = stmt.query([&backup.id])?;
             while let Some(row) = rows.next()? {
                 let path: String = row.get(7)?;
@@ -1577,6 +1736,10 @@ fn main() -> Result<()> {
     std::env::set_var("RUST_LIB_BACKTRACE", "1");
 
     let mut options = Options::from_args();
+
+    let logspec = if options.verbose {"DEBUG"} else {"INFO"};
+    Logger::try_with_env_or_str(logspec)?.start()?;
+    debug!("Parsed options: {options:?}");
 
     if let Err(e) = which(&options.mtx) {
         Err(eyre!("Could not find mtx program: {mtx}: {e}", mtx=options.mtx.display()))?
