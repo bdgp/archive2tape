@@ -100,7 +100,7 @@ enum Command {
 }
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "backup2tape", about = "Incremental tape archiving tool")]
+#[structopt(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::ArgRequiredElseHelp])]
 struct Options {
     //#[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/tape/by-id/scsi-35000e111c89b5001-nst")]
     #[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/sg2")]

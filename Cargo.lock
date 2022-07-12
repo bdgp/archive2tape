@@ -910,6 +910,7 @@ name = "tape-archives"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "clap",
  "color-eyre",
  "csv",
  "dateparser",

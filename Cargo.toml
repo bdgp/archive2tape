@@ -6,6 +6,7 @@ authors = ["Ben Booth <benwbooth@gmail.com>"]
 
 [dependencies]
 regex = "*"
+clap = "*"
 structopt = "*"
 structopt-derive = "*"
 duct = "*"
