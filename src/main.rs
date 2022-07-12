@@ -41,53 +41,57 @@ use flexi_logger::Logger;
 
 #[derive(StructOpt, Debug)]
 struct BackupCmd {
-    #[structopt(long = "include", help = "Regex patterns to include files", name="REGEX")]
+    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include: Vec<regex::bytes::Regex>,
-    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="REGEX")]
+    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
     exclude: Vec<regex::bytes::Regex>,
-    #[structopt(help = "Glob patterns to match files in filesystem", name="PATTERN")]
+    #[structopt(help = "Glob patterns to match files in filesystem", name="GLOB_PATTERN")]
     patterns: Vec<Pattern>,
 }
 
 #[derive(StructOpt, Debug)]
 struct RestoreCmd {
-    #[structopt(long = "restore-path", help = "Restore path", name="PATH", default_value=".")]
+    #[structopt(long = "restore-path", help = "Restore path", name="RESTORE_PATH", default_value=".")]
     restore_path: PathBuf,
     #[structopt(long = "noclobber", help = "Do not ovewrite existing files during a restore")]
     noclobber: bool,
-    #[structopt(long = "backup-id", help = "Backup ID to use for restore (default is latest backup)", name="ID")]
+    #[structopt(long = "backup-id", help = "Backup ID to use for restore (default is latest backup)", name="BACKUP_ID")]
     backup_id: Option<i64>,
-    #[structopt(long = "backup-uuid", help = "Backup UUID to use for restore (default is latest backup)", name="UUID")]
+    #[structopt(long = "backup-uuid", help = "Backup UUID to use for restore (default is latest backup)", name="BACKUP_UUID")]
     backup_uuid: Option<String>,
-    #[structopt(long = "backup-date", help = "Backup date to use for restore (default is latest backup)", name="DATETIME")]
+    #[structopt(long = "backup-date", help = "Backup date to use for restore (default is latest backup)", name="BACKUP_DATETIME")]
     backup_date: Option<String>,
-    #[structopt(long = "filter", help = "Regex to filter restore files", name="REGEX")]
-    filter: Option<regex::bytes::Regex>,
+    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    include: Vec<regex::bytes::Regex>,
+    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    exclude: Vec<regex::bytes::Regex>,
     #[structopt(help = "Glob patterns to filter restore files", name="PATTERN")]
     patterns: Vec<Pattern>,
 }
 
 #[derive(StructOpt, Debug)]
 struct ListBackupsCmd { 
-    #[structopt(long = "backup-id", help = "Backup ID to search", name="ID")]
+    #[structopt(long = "backup-id", help = "Backup ID to search", name="BACKUP_ID")]
     backup_id: Option<i64>,
-    #[structopt(long = "backup-uuid", help = "Backup UUID to search", name="UUID")]
+    #[structopt(long = "backup-uuid", help = "Backup UUID to search", name="BACKUP_UUID")]
     backup_uuid: Option<String>,
-    #[structopt(long = "backup-date", help = "Backup date to search", name="DATETIME")]
+    #[structopt(long = "backup-date", help = "Backup date to search", name="BACKUP_DATETIME")]
     backup_date: Option<String>,
 }
 
 #[derive(StructOpt, Debug)]
 struct ListFilesCmd {
-    #[structopt(long = "backup-id", help = "Backup ID to search", name="ID")]
+    #[structopt(long = "backup-id", help = "Backup ID to search", name="BACKUP_ID")]
     backup_id: Option<i64>,
-    #[structopt(long = "backup-uuid", help = "Backup UUID to search", name="UUID")]
+    #[structopt(long = "backup-uuid", help = "Backup UUID to search", name="BACKUP_UUID")]
     backup_uuid: Option<String>,
-    #[structopt(long = "backup-date", help = "Backup date to search", name="DATETIME")]
+    #[structopt(long = "backup-date", help = "Backup date to search", name="BACKUP_DATETIME")]
     backup_date: Option<String>,
-    #[structopt(long = "filter", help = "Regex to filter search results", name="REGEX")]
-    filter: Option<regex::bytes::Regex>,
-    #[structopt(help = "Glob patterns to filter search results", name="PATTERN")]
+    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    include: Vec<regex::bytes::Regex>,
+    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    exclude: Vec<regex::bytes::Regex>,
+    #[structopt(help = "Glob patterns to filter search results", name="GLOB_PATTERN")]
     patterns: Vec<Pattern>,
 }
 
@@ -100,34 +104,34 @@ enum Command {
 }
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::ArgRequiredElseHelp])]
+#[structopt(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::ArgRequiredElseHelp, clap::AppSettings::UnifiedHelpMessage])]
 struct Options {
     //#[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/tape/by-id/scsi-35000e111c89b5001-nst")]
-    #[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/sg2")]
+    #[structopt(long = "drive", help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/sg2")]
     drive: PathBuf,
-    #[structopt(long = "loader", help = "Path to loader device", name="DEVICE", default_value="/dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0")]
+    #[structopt(long = "loader", help = "Path to loader device", name="LOADER_DEVICE", default_value="/dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0")]
     loader: PathBuf,
-    #[structopt(long = "mtx", help = "Path to mtx command (from mtx package)", name="PATH", default_value="mtx")]
+    #[structopt(long = "mtx", help = "Path to mtx command (from mtx package)", name="MTX_PATH", default_value="mtx")]
     mtx: PathBuf,
-    #[structopt(long = "mt", help = "Path to mt command (from cpio package)", name="PATH", default_value="mt")]
+    #[structopt(long = "mt", help = "Path to mt command (from cpio package)", name="MT_PATH", default_value="mt")]
     mt: PathBuf,
-    #[structopt(long = "ltfs", help = "Path to ltfs command", name="PATH", default_value="ltfs")]
+    #[structopt(long = "ltfs", help = "Path to ltfs command", name="LTFS_PATH", default_value="ltfs")]
     ltfs: PathBuf,
-    #[structopt(long = "mkltfs", help = "Path to mkltfs command", name="PATH", default_value="mkltfs")]
+    #[structopt(long = "mkltfs", help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="mkltfs")]
     mkltfs: PathBuf,
-    #[structopt(long = "umount", help = "Path to umount command", name="PATH", default_value="umount")]
+    #[structopt(long = "umount", help = "Path to umount command", name="UMOUNT_PATH", default_value="umount")]
     umount: PathBuf,
-    #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="PATH")]
+    #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="DB_PATH")]
     db: PathBuf,
-    #[structopt(long = "tapes-db", help = "Path to SQLite tapes metadata database", name="PATH")]
+    #[structopt(long = "tapes-db", help = "Path to SQLite tapes metadata database", name="TAPES_DB_PATH")]
     tapes_db: Option<PathBuf>,
     #[structopt(long = "create-db", help = "Create the metadata database if it doesn't exist")]
     create_db: bool,
-    #[structopt(long = "ltfs-path", help = "Mount path for LTFS filesystem", name="PATH", default_value="/media/lto8")]
+    #[structopt(long = "ltfs-path", help = "Mount path for LTFS filesystem", name="LTFS_MOUNT_PATH", default_value="/media/lto8")]
     ltfs_path: PathBuf,
-    #[structopt(long = "tape", help = "List of tapes to use for backup and restore. If none specified, use any tapes", name="LABEL")]
+    #[structopt(long = "tape", help = "List of tapes to use for backup and restore. If none specified, use any tapes", name="TAPE_LABEL")]
     tapes: Vec<String>,
-    #[structopt(long = "ignore-tape", help = "Regex patterns to ignore tapes with matching label", name="REGEX", default_value="^CLN")]
+    #[structopt(long = "ignore-tape", help = "Regex patterns to ignore tapes with matching label", name="IGNORE_TAPE_REGEX", default_value="^CLN")]
     ignore_tape: Regex,
     #[structopt(long = "verbose", help = "Run in verbose mode")]
     verbose: bool,
@@ -1332,9 +1336,25 @@ impl Options {
                         continue;
                     }
                 }
-                if let Some(f) = &restore_cmd.filter {
-                    if ! f.is_match(full_backup.path.as_os_str().as_bytes()) {
+                // check include filters
+                if !restore_cmd.include.is_empty() {
+                    let mut to_include = false;
+                    for i in &restore_cmd.include {
+                        if i.is_match(full_backup.path.as_os_str().as_bytes()) {
+                            to_include = true;
+                            break;
+                        }
+                    }
+                    if !to_include {
                         continue;
+                    }
+                }
+                // check exclude filters
+                if !restore_cmd.exclude.is_empty() {
+                    for e in &restore_cmd.exclude {
+                        if e.is_match(full_backup.path.as_os_str().as_bytes()) {
+                            continue;
+                        }
                     }
                 }
                 // make sure correct tape is loaded and mounted
@@ -1461,7 +1481,7 @@ impl Options {
 
     fn list_backups(&self) -> Result<()> {
         debug!("Running list_backups");
-        let cmd = match &self.cmd {
+        let list_backups_cmd = match &self.cmd {
             Some(Command::ListBackups(l)) => l,
             _ => Err(eyre!("Couldn't match subcommand!"))?,
         };
@@ -1497,20 +1517,20 @@ impl Options {
             from backup 
             {where}
             order by date_created
-            "#, where=if cmd.backup_id.is_some() || cmd.backup_uuid.is_some() || cmd.backup_date.is_some() 
+            "#, where=if list_backups_cmd.backup_id.is_some() || list_backups_cmd.backup_uuid.is_some() || list_backups_cmd.backup_date.is_some() 
                 {r#"where (id=?1 or uuid=?2 or date_created <= ?3)"#} 
                 else {""});
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(&sql)?;
             let cols = stmt.column_names().iter().map(|c| c.to_string()).collect::<Vec<_>>();
-            let mut rows = if cmd.backup_id.is_some() || cmd.backup_uuid.is_some() || cmd.backup_date.is_some() {
-                let backup_date = cmd.backup_date.clone().map(|bd| 
+            let mut rows = if list_backups_cmd.backup_id.is_some() || list_backups_cmd.backup_uuid.is_some() || list_backups_cmd.backup_date.is_some() {
+                let backup_date = list_backups_cmd.backup_date.clone().map(|bd| 
                     bd.parse::<dateparser::DateTimeUtc>().ok().map(|d| 
                         d.0.timestamp())
                     ).unwrap_or(None);
                 stmt.query(params![
-                    cmd.backup_id,
-                    cmd.backup_uuid,
+                    list_backups_cmd.backup_id,
+                    list_backups_cmd.backup_uuid,
                     &backup_date,
                 ])?
             } else {
@@ -1533,7 +1553,7 @@ impl Options {
 
     fn list_files(&self) -> Result<()> {
         debug!("Running list_files");
-        let cmd = match &self.cmd {
+        let list_files_cmd = match &self.cmd {
             Some(Command::ListFiles(l)) => l,
             _ => Err(eyre!("Couldn't match subcommand!"))?,
         };
@@ -1592,18 +1612,18 @@ impl Options {
             {where}
             order by date_created desc
             limit 1
-            "#, where=if cmd.backup_id.is_some() || cmd.backup_uuid.is_some() || cmd.backup_date.is_some() 
+            "#, where=if list_files_cmd.backup_id.is_some() || list_files_cmd.backup_uuid.is_some() || list_files_cmd.backup_date.is_some() 
                 {r#"where (b.id=?1 or b.uuid=?2 or b.date_created <= ?3)"#} 
                 else {""});
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = if cmd.backup_id.is_some() || cmd.backup_uuid.is_some() || cmd.backup_date.is_some() {
-                let backup_date = cmd.backup_date.clone().map(|bd| 
+            let mut rows = if list_files_cmd.backup_id.is_some() || list_files_cmd.backup_uuid.is_some() || list_files_cmd.backup_date.is_some() {
+                let backup_date = list_files_cmd.backup_date.clone().map(|bd| 
                     bd.parse::<dateparser::DateTimeUtc>().ok().map(|d| 
                         d.0.timestamp())
                     ).unwrap_or(None);
                 stmt.query(params![
-                    cmd.backup_id,
-                    cmd.backup_uuid,
+                    list_files_cmd.backup_id,
+                    list_files_cmd.backup_uuid,
                     &backup_date,
                 ])?
             } else {
@@ -1674,9 +1694,9 @@ impl Options {
                     filetype: FileType::try_from(filetype)?,
                     symlink_target: if let Some(s) = symlink_target {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&s)?)))} else {None},
                 };
-                if ! cmd.patterns.is_empty() {
+                if ! list_files_cmd.patterns.is_empty() {
                     let mut found_match = false;
-                    for pattern in &cmd.patterns {
+                    for pattern in &list_files_cmd.patterns {
                         if pattern.matches_path(&full_backup.path) {
                             found_match = true;
                             break;
@@ -1686,9 +1706,25 @@ impl Options {
                         continue;
                     }
                 }
-                if let Some(f) = &cmd.filter {
-                    if ! f.is_match(full_backup.path.as_os_str().as_bytes()) {
+                // check include filters
+                if !list_files_cmd.include.is_empty() {
+                    let mut to_include = false;
+                    for i in &list_files_cmd.include {
+                        if i.is_match(full_backup.path.as_os_str().as_bytes()) {
+                            to_include = true;
+                            break;
+                        }
+                    }
+                    if !to_include {
                         continue;
+                    }
+                }
+                // check exclude filters
+                if !list_files_cmd.exclude.is_empty() {
+                    for e in &list_files_cmd.exclude {
+                        if e.is_match(full_backup.path.as_os_str().as_bytes()) {
+                            continue;
+                        }
                     }
                 }
                 let tape = tapes.get(&full_backup.tape_id).
