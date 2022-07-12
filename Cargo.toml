@@ -25,6 +25,10 @@ linked-hash-map = "*"
 num_enum = "*"
 walkdir = "*"
 dateparser = "*"
+nix = "*"
+csv = "*"
+file-mode = "*"
+users = "*"
 
 [dependencies.uuid]
 version = "*"
