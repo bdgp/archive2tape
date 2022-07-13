@@ -37,6 +37,15 @@ use users::{Users, Groups};
 use log::{info, debug};
 use flexi_logger::Logger;
 
+// TODO: ctrl-c handling
+// TODO: queue up file and backup2file records during file transfer and write to db using tx once per minute
+// TODO: make sure db records are written on ctrl+c or failure
+// TODO: if tape becomes full, unmount, remount, iterate over every file in the db and queue
+// that is associated with the current backup and tape, if the file doesn't exist on tape
+// after remounting, delete the backup2file and file db records, and re-queue the file(s) for transfer
+// TODO: debug sqlite queries, fix any remaining bugs
+// TODO: add --complete flags to backup and restore commands to filter out incomplete backups
+
 // /dev/sg0 lto5 drive
 // /dev/sg1 lto5 loader
 // /dev/sg2 lto8 drive
@@ -788,6 +797,7 @@ impl Options {
                                 }
                             }
                         }
+                        // insert the new_file record
                         let attr = std::fs::metadata(&entry)?;
                         stmt.execute(params![
                             stfu8::encode_u8_pretty(entry.as_os_str().as_bytes()),
@@ -887,9 +897,11 @@ impl Options {
                     };
                     if let Some(new_file) = &backup_diff.new_file {
                         if backup_diff.full_backup.is_none() {
+                            // add new_file record to to_copy
                             (*to_copy).insert(new_file.path.clone(), new_file.clone());
                         }
                     }
+                    // add backup_diff record to backup_diffs
                     backup_diffs.push(backup_diff);
                 }
             }
@@ -948,6 +960,7 @@ impl Options {
 
         // now transfer the files
         if ! (*to_copy.borrow_mut()).is_empty() {
+            // produce a timestamp string
             let date_created = if let Some(backup) = &backup {backup.date_created} else {std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64};
             let naive = NaiveDateTime::from_timestamp(date_created, 0);
             let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
@@ -955,6 +968,7 @@ impl Options {
             let timestamp = format!("{newdate}");
             debug!("timestamp={timestamp}");
 
+            // compute the destination path on the ltfs filesystem
             let dest = [
                 &self.ltfs_path, 
                 &PathBuf::from("backup"),
@@ -968,6 +982,7 @@ impl Options {
 
             let tape = Rc::new(RefCell::new(Option::<StorageElement>::None));
             let verified_files = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+
             let mut save_verified_files = || -> Result<()> {
                 let mut to_copy = to_copy.borrow_mut();
                 let tape = tape.borrow_mut();
@@ -1173,7 +1188,12 @@ impl Options {
                     }
                     // if the transfer completed without filling up the tape, then 
                     // we can assume all the transferred files copied successfully
-                    if backup_cmd.dry_run || !tape_full {
+                    if backup_cmd.dry_run {
+                        *verified_files = (*to_copy).keys().map(|k| k.clone()).collect();
+                        (*to_copy).clear();
+                        debug!("Transferred (*{} files)", (*verified_files).len());
+                    }
+                    else if !tape_full {
                         *verified_files = (*to_copy).keys().map(|k| k.clone()).collect();
                         (*to_copy).clear();
                         debug!("Transferred (*{} files)", (*verified_files).len());

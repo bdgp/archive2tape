@@ -31,6 +31,7 @@ file-mode = "*"
 users = "*"
 log = "*"
 flexi_logger = "*"
+ctrlc = "*"
 
 [dependencies.uuid]
 version = "*"
