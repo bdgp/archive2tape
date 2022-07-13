@@ -17,7 +17,6 @@ lazy_static = "*"
 lazy-regex = "*"
 which = "*"
 sysinfo = "*"
-rusqlite = "*"
 stfu8 = "*"
 chrono = "*"
 rand = "*"
@@ -36,6 +35,10 @@ flexi_logger = "*"
 [dependencies.uuid]
 version = "*"
 features = [ "v4" ]
+
+[dependencies.rusqlite]
+version = "*"
+features = [ "bundled" ]
 
 #[profile.dev]
 #opt-level = 2
