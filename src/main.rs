@@ -14,10 +14,11 @@ use glob::Pattern;
 
 use serde::{Serializer, Deserializer, Deserialize, de};
 use structopt::StructOpt;
+use walkdir::WalkDir;
 use std::vec::Vec;
 use duct::cmd;
 
-use lazy_regex::{regex_captures, regex_is_match};
+use lazy_regex::{regex_captures, regex_is_match, regex_replace};
 
 use which::which;
 
@@ -47,9 +48,13 @@ use serde_derive::{Deserialize, Serialize};
 #[derive(StructOpt, Debug)]
 struct BackupCmd {
     #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
-    include: Vec<regex::bytes::Regex>,
+    include: Vec<Pattern>,
     #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
-    exclude: Vec<regex::bytes::Regex>,
+    exclude: Vec<Pattern>,
+    #[structopt(long = "include-regex", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    include_regex: Vec<regex::bytes::Regex>,
+    #[structopt(long = "exclude-regex", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    exclude_regex: Vec<regex::bytes::Regex>,
     #[structopt(help = "Glob patterns to match files in filesystem", name="GLOB_PATTERN")]
     patterns: Vec<Pattern>,
     #[structopt(long = "dry-run", help = "Do not actually backup any files, just show what files would be backed up")]
@@ -71,9 +76,13 @@ struct RestoreCmd {
     #[structopt(long = "backup-date", help = "Backup date to use for restore (default is latest backup)", name="BACKUP_DATETIME")]
     backup_date: Option<String>,
     #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
-    include: Vec<regex::bytes::Regex>,
+    include: Vec<Pattern>,
     #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
-    exclude: Vec<regex::bytes::Regex>,
+    exclude: Vec<Pattern>,
+    #[structopt(long = "include-regex", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    include_regex: Vec<regex::bytes::Regex>,
+    #[structopt(long = "exclude-regex", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    exclude_regex: Vec<regex::bytes::Regex>,
     #[structopt(help = "Glob patterns to filter restore files", name="PATTERN")]
     patterns: Vec<Pattern>,
     #[structopt(long = "dry-run", help = "Do not actually restore any files, just show what files would be restored")]
@@ -103,9 +112,13 @@ struct ListFilesCmd {
     #[structopt(long = "backup-date", help = "Backup date to search", name="BACKUP_DATETIME")]
     backup_date: Option<String>,
     #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
-    include: Vec<regex::bytes::Regex>,
+    include: Vec<Pattern>,
     #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
-    exclude: Vec<regex::bytes::Regex>,
+    exclude: Vec<Pattern>,
+    #[structopt(long = "include-regex", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    include_regex: Vec<regex::bytes::Regex>,
+    #[structopt(long = "exclude-regex", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    exclude_regex: Vec<regex::bytes::Regex>,
     #[structopt(help = "Glob patterns to filter search results", name="GLOB_PATTERN")]
     patterns: Vec<Pattern>,
 }
@@ -308,10 +321,40 @@ struct FullBackup {
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct BackupDiff {
-    new_file: NewFile,
-    full_backup: FullBackup,
+    new_file_id: i64,
+    #[serde(serialize_with = "pathbuf_serialize")]
+    #[serde(deserialize_with = "pathbuf_deserialize")]
+    new_file_path: PathBuf,
+    new_file_mtime: i64,
+    new_file_size: u64,
+    new_file_uid: u32,
+    new_file_gid: u32,
+    new_file_mode: u32,
+    #[serde(serialize_with = "filetype_serialize")]
+    #[serde(deserialize_with = "filetype_deserialize")]
+    new_file_filetype: FileType,
+    #[serde(serialize_with = "option_pathbuf_serialize")]
+    #[serde(deserialize_with = "option_pathbuf_deserialize")]
+    new_file_symlink_target: Option<PathBuf>,
+    full_backup_backup_id: i64,
+    full_backup_uid: u32,
+    full_backup_gid: u32,
+    full_backup_mode: u32,
+    full_backup_is_deleted: bool,
+    full_backup_file_id: i64,
+    full_backup_tape_id: i64,
+    #[serde(serialize_with = "pathbuf_serialize")]
+    #[serde(deserialize_with = "pathbuf_deserialize")]
+    full_backup_path: PathBuf,
+    full_backup_mtime: i64,
+    full_backup_size: u64,
+    #[serde(serialize_with = "filetype_serialize")]
+    #[serde(deserialize_with = "filetype_deserialize")]
+    full_backup_filetype: FileType,
+    #[serde(serialize_with = "option_pathbuf_serialize")]
+    #[serde(deserialize_with = "option_pathbuf_deserialize")]
+    full_backup_symlink_target: Option<PathBuf>,
 }
-
 
 #[derive(Debug)]
 struct BackupContext {
@@ -821,7 +864,7 @@ impl Options {
                         drop table if exists new_file;
                         create table new_file (
                             id integer primary key autoincrement not null,
-                            path text not null,
+                            path text unique not null,
                             mtime integer not null,
                             size integer not null,
                             uid integer not null,
@@ -835,55 +878,77 @@ impl Options {
                 tx.execute_batch(sql)?;
                 {
                     debug!("Inserting new_file records");
-                    let sql = "insert into new_file (path,mtime,size,uid,gid,mode,filetype,symlink_target) values (:path,:mtime,:size,:uid,:gid,:mode,:filetype,:symlink_target)";
+                    let sql = "insert into new_file (path,mtime,size,uid,gid,mode,filetype,symlink_target) values (:path,:mtime,:size,:uid,:gid,:mode,:filetype,:symlink_target) on conflict(path) do nothing";
                     let mut stmt = tx.prepare(sql)?;
                     let mut count = 0;
                     // use the glob patterns to produce a list of files
                     for g in &backup_cmd.patterns {
-                        'ENTRY:
                         for entry in glob::glob(g.as_str())? {
                             let entry = entry?;
-                            // ignore any entries that are not one of: directory, file, symlink
-                            if !entry.is_dir() && !entry.is_file() && !entry.is_symlink() {
-                                continue;
-                            }
-                            // check include filters
-                            if !backup_cmd.include.is_empty() {
-                                let mut to_include = false;
-                                for i in &backup_cmd.include {
-                                    if i.is_match(entry.as_os_str().as_bytes()) {
-                                        to_include = true;
-                                        break;
+                            for entry in WalkDir::new(&entry) {
+                                let entry = entry?;
+                                let entry = entry.path();
+                                // ignore any entries that are not one of: directory, file, symlink
+                                if !entry.is_dir() && !entry.is_file() && !entry.is_symlink() {
+                                    continue;
+                                }
+                                // check include filters
+                                if !backup_cmd.include_regex.is_empty() {
+                                    let mut to_include = false;
+                                    for i in &backup_cmd.include_regex {
+                                        if i.is_match(entry.as_os_str().as_bytes()) {
+                                            to_include = true;
+                                            break;
+                                        }
+                                    }
+                                    if !to_include {
+                                        continue;
                                     }
                                 }
-                                if !to_include {
-                                    continue 'ENTRY;
-                                }
-                            }
-                            // check exclude filters
-                            if !backup_cmd.exclude.is_empty() {
-                                for e in &backup_cmd.exclude {
-                                    if e.is_match(entry.as_os_str().as_bytes()) {
-                                        continue 'ENTRY;
+                                if !backup_cmd.include.is_empty() {
+                                    let mut to_include = false;
+                                    for i in &backup_cmd.include {
+                                        if i.matches_path(&entry) {
+                                            to_include = true;
+                                            break;
+                                        }
+                                    }
+                                    if !to_include {
+                                        continue;
                                     }
                                 }
-                            }
-                            // insert the new_file record
-                            let attr = std::fs::metadata(&entry)?;
-                            stmt.execute(serde_rusqlite::to_params_named_with_fields(&NewFile {
-                                id: 0,
-                                path: entry.clone(),
-                                mtime: attr.mtime(),
-                                size: attr.size(),
-                                uid: attr.uid(),
-                                gid: attr.gid(),
-                                mode: attr.mode(),
-                                filetype: if entry.is_dir() {FileType::Directory} else if entry.is_symlink() {FileType::Symlink} else {FileType::File},
-                                symlink_target: if entry.is_symlink() {Some(std::fs::read_link(&entry)?)} else {None},
-                            }, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
-                            count += 1;
-                            if count % 1000 == 0 {
-                                debug!("Inserted {count} records");
+                                // check exclude filters
+                                if !backup_cmd.exclude_regex.is_empty() {
+                                    for e in &backup_cmd.exclude_regex {
+                                        if e.is_match(entry.as_os_str().as_bytes()) {
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if !backup_cmd.exclude.is_empty() {
+                                    for e in &backup_cmd.exclude {
+                                        if e.matches_path(&entry) {
+                                            continue;
+                                        }
+                                    }
+                                }
+                                // insert the new_file record
+                                let attr = std::fs::metadata(&entry)?;
+                                stmt.execute(serde_rusqlite::to_params_named_with_fields(&NewFile {
+                                    id: 0,
+                                    path: PathBuf::from(entry),
+                                    mtime: attr.mtime(),
+                                    size: attr.size(),
+                                    uid: attr.uid(),
+                                    gid: attr.gid(),
+                                    mode: attr.mode(),
+                                    filetype: if entry.is_dir() {FileType::Directory} else if entry.is_symlink() {FileType::Symlink} else {FileType::File},
+                                    symlink_target: if entry.is_symlink() {Some(std::fs::read_link(&entry)?)} else {None},
+                                }, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
+                                count += 1;
+                                if count % 1000 == 0 {
+                                    debug!("Inserted {count} records");
+                                }
                             }
                         }
                     }
@@ -946,10 +1011,20 @@ impl Options {
                     let empty_pathbuf = PathBuf::from("");
                     while let Some(backup_diff) = rows_iter.next() {
                         let backup_diff = backup_diff?;
-                        if backup_diff.new_file.path != empty_pathbuf {
-                            if backup_diff.full_backup.path == empty_pathbuf {
+                        if backup_diff.new_file_path != empty_pathbuf {
+                            if backup_diff.full_backup_path == empty_pathbuf {
                                 // add new_file record to to_copy
-                                to_copy.push(backup_diff.new_file.clone());
+                                to_copy.push(NewFile {
+                                    id: backup_diff.new_file_id,
+                                    path: backup_diff.new_file_path.clone(),
+                                    mtime: backup_diff.new_file_mtime,
+                                    size: backup_diff.new_file_size,
+                                    uid: backup_diff.new_file_uid,
+                                    gid: backup_diff.new_file_gid,
+                                    mode: backup_diff.new_file_mode,
+                                    filetype: backup_diff.new_file_filetype,
+                                    symlink_target: backup_diff.new_file_symlink_target.clone(),
+                                });
                             }
                         }
                         // add backup_diff record to backup_diffs
@@ -974,16 +1049,16 @@ impl Options {
                         let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
                         let empty_pathbuf = PathBuf::from("");
                         for backup_diff in &backup_diffs {
-                            if backup_diff.full_backup.path != empty_pathbuf {
+                            if backup_diff.full_backup_path != empty_pathbuf {
                                 // creating a new db record using already backed up file
                                 // don't need to transfer anything
-                                if backup_diff.new_file.path != empty_pathbuf {
+                                if backup_diff.new_file_path != empty_pathbuf {
                                     b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
                                         backup_id: *backup_id,
-                                        file_id: backup_diff.full_backup.file_id,
-                                        uid: backup_diff.new_file.uid,
-                                        gid: backup_diff.new_file.gid,
-                                        mode: backup_diff.new_file.mode,
+                                        file_id: backup_diff.full_backup_file_id,
+                                        uid: backup_diff.new_file_uid,
+                                        gid: backup_diff.new_file_gid,
+                                        mode: backup_diff.new_file_mode,
                                         is_deleted: false,
                                     })?.to_slice().as_slice())?;
                                     count += 1;
@@ -992,10 +1067,10 @@ impl Options {
                                 else {
                                     b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
                                         backup_id: *backup_id,
-                                        file_id: backup_diff.full_backup.file_id,
-                                        uid: backup_diff.full_backup.uid,
-                                        gid: backup_diff.full_backup.gid,
-                                        mode: backup_diff.full_backup.mode,
+                                        file_id: backup_diff.full_backup_file_id,
+                                        uid: backup_diff.full_backup_uid,
+                                        gid: backup_diff.full_backup_gid,
+                                        mode: backup_diff.full_backup_mode,
                                         is_deleted: true,
                                     })?.to_slice().as_slice())?;
                                     count += 1;
@@ -1525,15 +1600,20 @@ impl Options {
                             found_match = true;
                             break;
                         }
+                        let recursive_pattern = Pattern::new(&regex_replace!(r#"/+(\*\*+)?$"#, pattern.as_str(), |_,_| "/**"))?;
+                        if recursive_pattern.matches_path(&full_backup.path) {
+                            found_match = true;
+                            break;
+                        }
                     }
                     if ! found_match {
                         continue;
                     }
                 }
                 // check include filters
-                if !restore_cmd.include.is_empty() {
+                if !restore_cmd.include_regex.is_empty() {
                     let mut to_include = false;
-                    for i in &restore_cmd.include {
+                    for i in &restore_cmd.include_regex {
                         if i.is_match(full_backup.path.as_os_str().as_bytes()) {
                             to_include = true;
                             break;
@@ -1543,15 +1623,33 @@ impl Options {
                         continue;
                     }
                 }
+                if !restore_cmd.include.is_empty() {
+                    let mut to_include = false;
+                    for i in &restore_cmd.include {
+                        if i.matches_path(&full_backup.path) {
+                            to_include = true;
+                            break;
+                        }
+                    }
+                    if !to_include {
+                        continue;
+                    }
+                }
                 // check exclude filters
-                if !restore_cmd.exclude.is_empty() {
-                    for e in &restore_cmd.exclude {
+                if !restore_cmd.exclude_regex.is_empty() {
+                    for e in &restore_cmd.exclude_regex {
                         if e.is_match(full_backup.path.as_os_str().as_bytes()) {
                             continue;
                         }
                     }
                 }
-                // transfer the file
+                if !restore_cmd.exclude.is_empty() {
+                    for e in &restore_cmd.exclude {
+                        if e.matches_path(&full_backup.path) {
+                            continue;
+                        }
+                    }
+                }
                 let source = [
                     &source_path,
                     &full_backup.path,
@@ -1573,6 +1671,7 @@ impl Options {
                     }
                     std::fs::create_dir_all(parent)?;
                 }
+                // transfer the file
                 match full_backup.filetype {
                     FileType::Directory => {
                         info!("{source}/ -> {dest}/", source=source.to_string_lossy(), dest=dest.to_string_lossy());
@@ -1897,15 +1996,20 @@ impl Options {
                             found_match = true;
                             break;
                         }
+                        let recursive_pattern = Pattern::new(&regex_replace!(r#"/+(\*\*+)?$"#, pattern.as_str(), |_,_| "/**"))?;
+                        if recursive_pattern.matches_path(&full_backup.path) {
+                            found_match = true;
+                            break;
+                        }
                     }
                     if ! found_match {
                         continue;
                     }
                 }
                 // check include filters
-                if !list_files_cmd.include.is_empty() {
+                if !list_files_cmd.include_regex.is_empty() {
                     let mut to_include = false;
-                    for i in &list_files_cmd.include {
+                    for i in &list_files_cmd.include_regex {
                         if i.is_match(full_backup.path.as_os_str().as_bytes()) {
                             to_include = true;
                             break;
@@ -1915,10 +2019,29 @@ impl Options {
                         continue;
                     }
                 }
+                if !list_files_cmd.include.is_empty() {
+                    let mut to_include = false;
+                    for i in &list_files_cmd.include {
+                        if i.matches_path(&full_backup.path) {
+                            to_include = true;
+                            break;
+                        }
+                    }
+                    if !to_include {
+                        continue;
+                    }
+                }
                 // check exclude filters
+                if !list_files_cmd.exclude_regex.is_empty() {
+                    for e in &list_files_cmd.exclude_regex {
+                        if e.is_match(full_backup.path.as_os_str().as_bytes()) {
+                            continue;
+                        }
+                    }
+                }
                 if !list_files_cmd.exclude.is_empty() {
                     for e in &list_files_cmd.exclude {
-                        if e.is_match(full_backup.path.as_os_str().as_bytes()) {
+                        if e.matches_path(&full_backup.path) {
                             continue;
                         }
                     }
