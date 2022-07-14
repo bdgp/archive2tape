@@ -36,7 +36,7 @@ use nix::sys::stat::Mode;
 use nix::unistd::{Uid,Gid};
 use users::{Users, Groups};
 
-use log::{info, debug};
+use log::{info, debug, error, warn};
 use flexi_logger::Logger;
 use serde_derive::{Deserialize, Serialize};
 
@@ -212,8 +212,8 @@ fn pathbuf_serialize<S>(x: &PathBuf, s: S) -> Result<S::Ok, S::Error> where S: S
 
 fn pathbuf_deserialize<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
 where D: Deserializer<'de> {
-    let s: &str = Deserialize::deserialize(deserializer)?;
-    Ok(PathBuf::from(OsString::from_vec(stfu8::decode_u8(s).map_err(de::Error::custom)?)))
+    let s: String = Deserialize::deserialize(deserializer)?;
+    Ok(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&s).map_err(de::Error::custom)?)))
 }
 
 fn option_pathbuf_serialize<S>(x: &Option<PathBuf>, s: S) -> Result<S::Ok, S::Error> where S: Serializer {
@@ -225,9 +225,9 @@ fn option_pathbuf_serialize<S>(x: &Option<PathBuf>, s: S) -> Result<S::Ok, S::Er
 
 fn option_pathbuf_deserialize<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
 where D: Deserializer<'de> {
-    let s: Option<&str> = Deserialize::deserialize(deserializer)?;
+    let s: Option<String> = Deserialize::deserialize(deserializer)?;
     match s {
-        Some(s) => Ok(Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(s).map_err(de::Error::custom)?)))),
+        Some(s) => Ok(Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&s).map_err(de::Error::custom)?)))),
         None => Ok(None),
     }
 }
@@ -319,41 +319,10 @@ struct FullBackup {
     symlink_target: Option<PathBuf>,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
 struct BackupDiff {
-    new_file_id: i64,
-    #[serde(serialize_with = "pathbuf_serialize")]
-    #[serde(deserialize_with = "pathbuf_deserialize")]
-    new_file_path: PathBuf,
-    new_file_mtime: i64,
-    new_file_size: u64,
-    new_file_uid: u32,
-    new_file_gid: u32,
-    new_file_mode: u32,
-    #[serde(serialize_with = "filetype_serialize")]
-    #[serde(deserialize_with = "filetype_deserialize")]
-    new_file_filetype: FileType,
-    #[serde(serialize_with = "option_pathbuf_serialize")]
-    #[serde(deserialize_with = "option_pathbuf_deserialize")]
-    new_file_symlink_target: Option<PathBuf>,
-    full_backup_backup_id: i64,
-    full_backup_uid: u32,
-    full_backup_gid: u32,
-    full_backup_mode: u32,
-    full_backup_is_deleted: bool,
-    full_backup_file_id: i64,
-    full_backup_tape_id: i64,
-    #[serde(serialize_with = "pathbuf_serialize")]
-    #[serde(deserialize_with = "pathbuf_deserialize")]
-    full_backup_path: PathBuf,
-    full_backup_mtime: i64,
-    full_backup_size: u64,
-    #[serde(serialize_with = "filetype_serialize")]
-    #[serde(deserialize_with = "filetype_deserialize")]
-    full_backup_filetype: FileType,
-    #[serde(serialize_with = "option_pathbuf_serialize")]
-    #[serde(deserialize_with = "option_pathbuf_deserialize")]
-    full_backup_symlink_target: Option<PathBuf>,
+    new_file: Option<NewFile>,
+    full_backup: Option<FullBackup>,
 }
 
 #[derive(Debug)]
@@ -885,72 +854,90 @@ impl Options {
                     // use the glob patterns to produce a list of files
                     for g in &backup_cmd.patterns {
                         for entry in glob::glob(g.as_str())? {
-                            let entry = entry?;
-                            for entry in WalkDir::new(&entry) {
-                                let entry = entry?;
-                                let entry = entry.path();
-                                // ignore any entries that are not one of: directory, file, symlink
-                                if !entry.is_dir() && !entry.is_file() && !entry.is_symlink() {
-                                    continue;
-                                }
-                                // check include filters
-                                if !backup_cmd.include_regex.is_empty() {
-                                    let mut to_include = false;
-                                    for i in &backup_cmd.include_regex {
-                                        if i.is_match(entry.as_os_str().as_bytes()) {
-                                            to_include = true;
-                                            break;
+                            match &entry {
+                                Ok(entry) => {
+                                    for direntry in WalkDir::new(&entry) {
+                                        match &direntry {
+                                            Ok(entry) => {
+                                                let path = entry.path();
+                                                // ignore any entries that are not one of: directory, file, symlink
+                                                if !path.is_dir() && !path.is_file() && !path.is_symlink() {
+                                                    continue;
+                                                }
+                                                // check include filters
+                                                if !backup_cmd.include_regex.is_empty() {
+                                                    let mut to_include = false;
+                                                    for i in &backup_cmd.include_regex {
+                                                        if i.is_match(path.as_os_str().as_bytes()) {
+                                                            to_include = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if !to_include {
+                                                        continue;
+                                                    }
+                                                }
+                                                if !backup_cmd.include.is_empty() {
+                                                    let mut to_include = false;
+                                                    for i in &backup_cmd.include {
+                                                        if i.matches_path(&path) {
+                                                            to_include = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if !to_include {
+                                                        continue;
+                                                    }
+                                                }
+                                                // check exclude filters
+                                                if !backup_cmd.exclude_regex.is_empty() {
+                                                    for e in &backup_cmd.exclude_regex {
+                                                        if e.is_match(path.as_os_str().as_bytes()) {
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+                                                if !backup_cmd.exclude.is_empty() {
+                                                    for e in &backup_cmd.exclude {
+                                                        if e.matches_path(&path) {
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+                                                // insert the new_file record
+                                                //debug!("Found file to backup: {path}", path=path.to_string_lossy());
+                                                match &entry.metadata() {
+                                                    Ok(attr) => {
+                                                        stmt.execute(serde_rusqlite::to_params_named_with_fields(&NewFile {
+                                                            id: 0,
+                                                            path: PathBuf::from(path),
+                                                            mtime: attr.mtime(),
+                                                            size: attr.size(),
+                                                            uid: attr.uid(),
+                                                            gid: attr.gid(),
+                                                            mode: attr.mode(),
+                                                            filetype: if path.is_dir() {FileType::Directory} else if path.is_symlink() {FileType::Symlink} else {FileType::File},
+                                                            symlink_target: if path.is_symlink() {Some(std::fs::read_link(&path)?)} else {None},
+                                                        }, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
+                                                        count += 1;
+                                                        if count % 1000 == 0 {
+                                                            debug!("Inserted {count} records");
+                                                        }
+                                                    },
+                                                    Err(e) => {
+                                                        warn!("Error reading metadata for file {f}: {e}, skipping", f=entry.path().to_string_lossy())
+                                                    },
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Error when walking directory {d}: {e}, skipping", d=entry.to_string_lossy());
+                                            },
                                         }
                                     }
-                                    if !to_include {
-                                        continue;
-                                    }
-                                }
-                                if !backup_cmd.include.is_empty() {
-                                    let mut to_include = false;
-                                    for i in &backup_cmd.include {
-                                        if i.matches_path(&entry) {
-                                            to_include = true;
-                                            break;
-                                        }
-                                    }
-                                    if !to_include {
-                                        continue;
-                                    }
-                                }
-                                // check exclude filters
-                                if !backup_cmd.exclude_regex.is_empty() {
-                                    for e in &backup_cmd.exclude_regex {
-                                        if e.is_match(entry.as_os_str().as_bytes()) {
-                                            continue;
-                                        }
-                                    }
-                                }
-                                if !backup_cmd.exclude.is_empty() {
-                                    for e in &backup_cmd.exclude {
-                                        if e.matches_path(&entry) {
-                                            continue;
-                                        }
-                                    }
-                                }
-                                // insert the new_file record
-                                //debug!("Found file to backup: {path}", path=entry.to_string_lossy());
-                                let attr = std::fs::symlink_metadata(&entry)?;
-                                stmt.execute(serde_rusqlite::to_params_named_with_fields(&NewFile {
-                                    id: 0,
-                                    path: PathBuf::from(entry),
-                                    mtime: attr.mtime(),
-                                    size: attr.size(),
-                                    uid: attr.uid(),
-                                    gid: attr.gid(),
-                                    mode: attr.mode(),
-                                    filetype: if entry.is_dir() {FileType::Directory} else if entry.is_symlink() {FileType::Symlink} else {FileType::File},
-                                    symlink_target: if entry.is_symlink() {Some(std::fs::read_link(&entry)?)} else {None},
-                                }, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
-                                count += 1;
-                                if count % 1000 == 0 {
-                                    debug!("Inserted {count} records");
-                                }
+                                },
+                                Err(e) => {
+                                    warn!("Error when scanning glob match: {g}: {e}, skipping", g=g.as_str());
+                                },
                             }
                         }
                     }
@@ -1049,24 +1036,43 @@ impl Options {
                     "#;
                     debug!("Running sql:\n{sql}\n");
                     let mut stmt = tx.prepare(sql)?;
-                    let mut rows_iter = serde_rusqlite::from_rows::<BackupDiff>(stmt.query(params![parent_backup_id])?);
-                    let empty_pathbuf = PathBuf::from("");
-                    while let Some(backup_diff) = rows_iter.next() {
-                        let backup_diff = backup_diff?;
-                        if backup_diff.new_file_path != empty_pathbuf {
-                            if backup_diff.full_backup_path == empty_pathbuf {
+                    let mut rows = stmt.query(params![parent_backup_id])?;
+                    while let Some(row) = rows.next()? {
+                        let backup_diff = BackupDiff {
+                            new_file: if row.get::<&str,Option<String>>("new_file_path")?.is_some() {
+                                Some(NewFile {
+                                    id: row.get("new_file_id")?,
+                                    path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&row.get::<&str,String>("new_file_path")?)?)),
+                                    mtime: row.get("new_file_mtime")?,
+                                    size: row.get("new_file_size")?,
+                                    uid: row.get("new_file_uid")?,
+                                    gid: row.get("new_file_gid")?,
+                                    mode: row.get("new_file_mode")?,
+                                    filetype: FileType::try_from(row.get::<&str,u8>("new_file_filetype")?)?,
+                                    symlink_target: if let Some(t) = row.get::<&str,Option<String>>("new_file_symlink_target")? {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&t)?)))} else {None},
+                                })
+                            } else {None},
+                            full_backup: if row.get::<&str,Option<String>>("full_backup_path")?.is_some() {
+                                Some(FullBackup {
+                                    backup_id: row.get("full_backup_backup_id")?,
+                                    uid: row.get("full_backup_uid")?,
+                                    gid: row.get("full_backup_gid")?,
+                                    mode: row.get("full_backup_mode")?,
+                                    is_deleted: row.get("full_backup_is_deleted")?,
+                                    file_id: row.get("full_backup_file_id")?,
+                                    tape_id: row.get("full_backup_tape_id")?,
+                                    path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&row.get::<&str,String>("full_backup_path")?)?)),
+                                    mtime: row.get("full_backup_mtime")?,
+                                    size: row.get("full_backup_size")?,
+                                    filetype: FileType::try_from(row.get::<&str,u8>("full_backup_filetype")?)?,
+                                    symlink_target: if let Some(t) = row.get::<&str,Option<String>>("full_backup_symlink_target")? {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&t)?)))} else {None},
+                                })
+                            } else {None},
+                        };
+                        if let Some(new_file) = &backup_diff.new_file {
+                            if backup_diff.full_backup.is_none() {
                                 // add new_file record to to_copy
-                                to_copy.push(NewFile {
-                                    id: backup_diff.new_file_id,
-                                    path: backup_diff.new_file_path.clone(),
-                                    mtime: backup_diff.new_file_mtime,
-                                    size: backup_diff.new_file_size,
-                                    uid: backup_diff.new_file_uid,
-                                    gid: backup_diff.new_file_gid,
-                                    mode: backup_diff.new_file_mode,
-                                    filetype: backup_diff.new_file_filetype,
-                                    symlink_target: backup_diff.new_file_symlink_target.clone(),
-                                });
+                                to_copy.push(new_file.clone());
                             }
                         }
                         // add backup_diff record to backup_diffs
@@ -1089,18 +1095,17 @@ impl Options {
                     {
                         let mut count = 0;
                         let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
-                        let empty_pathbuf = PathBuf::from("");
                         for backup_diff in &backup_diffs {
-                            if backup_diff.full_backup_path != empty_pathbuf {
+                            if let Some(full_backup) = &backup_diff.full_backup {
                                 // creating a new db record using already backed up file
                                 // don't need to transfer anything
-                                if backup_diff.new_file_path != empty_pathbuf {
+                                if let Some(new_file) = &backup_diff.new_file {
                                     b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
                                         backup_id: *backup_id,
-                                        file_id: backup_diff.full_backup_file_id,
-                                        uid: backup_diff.new_file_uid,
-                                        gid: backup_diff.new_file_gid,
-                                        mode: backup_diff.new_file_mode,
+                                        file_id: full_backup.file_id,
+                                        uid: new_file.uid,
+                                        gid: new_file.gid,
+                                        mode: new_file.mode,
                                         is_deleted: false,
                                     })?.to_slice().as_slice())?;
                                     count += 1;
@@ -1109,10 +1114,10 @@ impl Options {
                                 else {
                                     b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
                                         backup_id: *backup_id,
-                                        file_id: backup_diff.full_backup_file_id,
-                                        uid: backup_diff.full_backup_uid,
-                                        gid: backup_diff.full_backup_gid,
-                                        mode: backup_diff.full_backup_mode,
+                                        file_id: full_backup.file_id,
+                                        uid: full_backup.uid,
+                                        gid: full_backup.gid,
+                                        mode: full_backup.mode,
                                         is_deleted: true,
                                     })?.to_slice().as_slice())?;
                                     count += 1;
@@ -1139,7 +1144,7 @@ impl Options {
         }
         let naive = NaiveDateTime::from_timestamp(date_created, 0);
         let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
-        let newdate = datetime.format("%Y-%m-%d %H:%M:%S");
+        let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
         let timestamp = format!("{newdate}");
         debug!("timestamp={timestamp}");
 
@@ -1155,6 +1160,7 @@ impl Options {
         ].iter().collect::<PathBuf>();
         debug!("dest={dest}", dest=dest.to_string_lossy());
 
+        debug!("set save_queued_files");
         let save_queued_files = {
             let conn = conn.clone();
             let ctx = ctx.clone();
@@ -1207,6 +1213,7 @@ impl Options {
 
         // attempt to save any queued files to the database if ctrl+c is pressed
         // or the process gets a termination signal
+        debug!("set ctrl+c handler");
         {
             let save_queued_files = save_queued_files.clone();
             ctrlc::set_handler(move || {
@@ -1217,10 +1224,16 @@ impl Options {
         }
 
         let catch = || -> Result<()> {
+            debug!("Entered catch handler");
             let mut old_tape = Option::<String>::None;
             let mut start = Instant::now();
 
-            while ! ctx.lock().or_else(|_| Err(eyre!("Could not acquire ctx lock")))?.to_copy.is_empty() {
+            let mut to_copy_is_empty = true;
+            if let Ok(ctx) = ctx.lock() {
+                to_copy_is_empty = ctx.to_copy.is_empty();
+            }
+            while ! to_copy_is_empty {
+                debug!("Entered ctx lock");
                 if let Ok(mut ctx) = ctx.lock() {
                     ctx.tape = if !backup_cmd.dry_run {Some(self.ready_storage()?)} else {None};
                     if let Some(tape) = &ctx.tape {
@@ -1232,14 +1245,25 @@ impl Options {
                 }
                 let mut tape_full = false;
                 let mut old_dir = Option::<(PathBuf, i64)>::None;
-                while let Some(file) = ctx.lock().or_else(|_| Err(eyre!("Could not acquire ctx lock")))?.to_copy.pop_front() {
+                debug!("getting lock");
+                let mut next_file = Option::<NewFile>::None;
+                if let Ok(mut ctx) = ctx.lock() {
+                    next_file = ctx.to_copy.pop_front();
+                }
+                while let Some(file) = &next_file {
+                    debug!("Handling file {file:#?}");
                     if let Ok(mut ctx) = ctx.lock() {
+                        debug!("Entered lock");
                         if let Some(file_name) = file.path.file_name() {
+                            let file_path = PathBuf::from(file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
+                            let file_path = file_path.strip_prefix("/").unwrap_or_else(|_| file_path.as_path());
+
                             let dest_path = [
                                 &dest.as_path(), 
-                                &file.path.parent().unwrap_or(PathBuf::from(".").as_path()),
-                                ].iter().collect::<PathBuf>();
+                                &file_path,
+                            ].iter().collect::<PathBuf>();
                             // make sure dest path exists
+                            debug!("Create parent directories: {}", dest_path.to_string_lossy());
                             if let Err(e) = std::fs::create_dir_all(&dest_path) {
                                 if self.is_tape_full()? {
                                     tape_full = true;
@@ -1270,9 +1294,10 @@ impl Options {
                             match file.filetype {
                                 FileType::Directory => {
                                     let destdir = [
-                                        &dest,
-                                        &file.path,
+                                        &dest_path,
+                                        &PathBuf::from(file_name),
                                     ].iter().collect::<PathBuf>();
+
                                     info!("{path}/ -> {destdir}/", path=file.path.to_string_lossy(), destdir=destdir.to_string_lossy());
                                     if ! backup_cmd.dry_run {
                                         // create the directory
@@ -1291,30 +1316,38 @@ impl Options {
                                 },
                                 FileType::Symlink => {
                                     // create the symlink
-                                    let dest_file = [&dest_path, &PathBuf::from(file_name)].iter().collect::<PathBuf>();
-                                    let target = std::fs::read_link(&file.path)?;
-                                    info!("{path} -> {dest_file} ({target})", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy(), target=target.to_string_lossy());
-                                    if ! backup_cmd.dry_run {
-                                        if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
-                                            if self.is_tape_full()? {
-                                                tape_full = true;
-                                                break;
+                                    let dest_file = [
+                                        &dest_path, 
+                                        &PathBuf::from(file_name),
+                                    ].iter().collect::<PathBuf>();
+
+                                    if let Some(target) = &file.symlink_target {
+                                        info!("{path} -> {dest_file} ({target})", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy(), target=target.to_string_lossy());
+                                        if ! backup_cmd.dry_run {
+                                            if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
+                                                if self.is_tape_full()? {
+                                                    tape_full = true;
+                                                    break;
+                                                }
+                                                else {
+                                                    Err(e)?
+                                                }
                                             }
-                                            else {
-                                                Err(e)?
+                                            // set the symlinks's mtime
+                                            let mtime = FileTime::from_unix_time(file.mtime, 0);
+                                            if let Err(e) = filetime::set_symlink_file_times(&dest_file, mtime.clone(), mtime.clone()) {
+                                                if self.is_tape_full()? {
+                                                    tape_full = true;
+                                                    break;
+                                                }
+                                                else {
+                                                    Err(e)?
+                                                }
                                             }
                                         }
-                                        // set the symlinks's mtime
-                                        let mtime = FileTime::from_unix_time(file.mtime, 0);
-                                        if let Err(e) = filetime::set_symlink_file_times(&dest_file, mtime.clone(), mtime.clone()) {
-                                            if self.is_tape_full()? {
-                                                tape_full = true;
-                                                break;
-                                            }
-                                            else {
-                                                Err(e)?
-                                            }
-                                        }
+                                    }
+                                    else {
+                                        Err(eyre!("Symlink record {file:#?} has null symlink_target field!"))?;
                                     }
                                 },
                                 FileType::File => {
@@ -1330,14 +1363,27 @@ impl Options {
                                     tmp_file_name.extend(b".");
                                     tmp_file_name.extend(randext.as_bytes());
                                     let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
-                                    let tmp_file = [&dest_path, &tmp_file_name].iter().collect::<PathBuf>();
-                                    let dest_file = [&dest_path, &PathBuf::from(file_name)].iter().collect::<PathBuf>();
+
+                                    let tmp_file = [
+                                        &dest_path, 
+                                        &tmp_file_name,
+                                    ].iter().collect::<PathBuf>();
+
+                                    let dest_file = [
+                                        &dest_path, 
+                                        &PathBuf::from(file_name),
+                                    ].iter().collect::<PathBuf>();
+
                                     info!("{path} -> {dest_file}", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy());
                                     if ! backup_cmd.dry_run {
                                         if let Err(e) = std::fs::copy(&file.path, &tmp_file) {
                                             if self.is_tape_full()? {
                                                 tape_full = true;
                                                 break;
+                                            }
+                                            else if !file.path.exists() {
+                                                error!("File {} no longer exists, skipping backup!", file.path.to_string_lossy());
+                                                continue;
                                             }
                                             else {
                                                 Err(e)?
@@ -1380,6 +1426,7 @@ impl Options {
                                 start = Instant::now();
                             }
                         }
+                        next_file = ctx.to_copy.pop_front();
                     }
                 }
                 // check if we need to set old_dir's mtime
@@ -1434,9 +1481,12 @@ impl Options {
                             let mut rows_iter = serde_rusqlite::from_rows::<NewFile>(rows);
                             while let Some(new_file) = rows_iter.next() {
                                 let new_file = new_file?;
+                                let new_file_path = PathBuf::from(new_file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
+                                let new_file_path = new_file_path.strip_prefix("/").unwrap_or_else(|_| new_file_path.as_path());
+
                                 let path = [
-                                    &dest,
-                                    &new_file.path,
+                                    &dest.as_path(),
+                                    &new_file_path,
                                 ].iter().collect::<PathBuf>();
                                 let mut file_exists = false;
                                 if path.exists() {
@@ -1485,9 +1535,13 @@ impl Options {
                         ctx.to_copy = to_delete;
                     }
                 }
+                if let Ok(ctx) = ctx.lock() {
+                    to_copy_is_empty = ctx.to_copy.is_empty();
+                }
             }
             Ok(())
         };
+        debug!("run catch");
         let result = catch();
         if let Ok(save_queued_files) = save_queued_files.lock() {
             save_queued_files()?;
@@ -1581,7 +1635,7 @@ impl Options {
             let date_created = backup.date_created;
             let naive = NaiveDateTime::from_timestamp(date_created, 0);
             let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
-            let newdate = datetime.format("%Y-%m-%d %H:%M:%S");
+            let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
             let timestamp = format!("{newdate}");
             debug!("timestamp={timestamp}");
 
@@ -1692,13 +1746,16 @@ impl Options {
                         }
                     }
                 }
+
+                let full_backup_path = PathBuf::from(full_backup.path.parent().unwrap_or(PathBuf::from(".").as_path()));
+                let full_backup_path = full_backup_path.strip_prefix("/").unwrap_or_else(|_| full_backup_path.as_path());
                 let source = [
-                    &source_path,
-                    &full_backup.path,
+                    &source_path.as_path(),
+                    &full_backup_path,
                 ].iter().collect::<PathBuf>();
                 let dest = [
-                    &restore_cmd.restore_path,
-                    &full_backup.path,
+                    &restore_cmd.restore_path.as_path(),
+                    &full_backup_path,
                 ].iter().collect::<PathBuf>();
 
                 if let Some(parent) = dest.parent() {
@@ -1782,7 +1839,10 @@ impl Options {
                                 tmp_file_name.extend(b".");
                                 tmp_file_name.extend(randext.as_bytes());
                                 let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
-                                let tmp_file = [&PathBuf::from(dest_path), &tmp_file_name].iter().collect::<PathBuf>();
+                                let tmp_file = [
+                                    &PathBuf::from(dest_path), 
+                                    &tmp_file_name,
+                                ].iter().collect::<PathBuf>();
 
                                 info!("{source} -> {dest}", source=source.to_string_lossy(), dest=dest.to_string_lossy());
 
@@ -2093,7 +2153,7 @@ impl Options {
 
                 let naive = NaiveDateTime::from_timestamp(full_backup.mtime, 0);
                 let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
-                let newdate = datetime.format("%Y-%m-%d %H:%M:%S");
+                let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
                 let timestamp = format!("{newdate}");
                 let path = stfu8::encode_u8_pretty(full_backup.path.as_os_str().as_bytes());
                 let mode = file_mode::Mode::from(full_backup.mode);
