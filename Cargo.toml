@@ -35,6 +35,7 @@ ctrlc = "*"
 serde = "*"
 serde_rusqlite = "*"
 serde_derive = "*"
+shell-escape = "*"
 
 [dependencies.uuid]
 version = "*"

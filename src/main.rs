@@ -1,7 +1,7 @@
 #![cfg_attr(feature = "cargo-clippy", allow(cyclomatic_complexity, trivial_regex))]
 use std::os::unix::prelude::MetadataExt;
 use std::path::PathBuf;
-use std::io::BufRead;
+use std::io::{BufRead, BufReader};
 use std::collections::{HashSet, LinkedList};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Mutex, Arc};
@@ -16,7 +16,6 @@ use serde::{Serializer, Deserializer, Deserialize, de};
 use structopt::StructOpt;
 use walkdir::WalkDir;
 use std::vec::Vec;
-use duct::cmd;
 
 use lazy_regex::{regex_captures, regex_is_match, regex_replace};
 
@@ -36,7 +35,7 @@ use nix::sys::stat::Mode;
 use nix::unistd::{Uid,Gid};
 use users::{Users, Groups};
 
-use log::{info, debug, error, warn};
+use log::{info, debug, error, warn, trace};
 use flexi_logger::Logger;
 use serde_derive::{Deserialize, Serialize};
 
@@ -143,9 +142,9 @@ struct Options {
     mtx: PathBuf,
     #[structopt(long = "mt", help = "Path to mt command (from cpio package)", name="MT_PATH", default_value="mt")]
     mt: PathBuf,
-    #[structopt(long = "ltfs", help = "Path to ltfs command", name="LTFS_PATH", default_value="ltfs")]
+    #[structopt(long = "ltfs", help = "Path to ltfs command", name="LTFS_PATH", default_value="/usr/local/bin/ltfs")]
     ltfs: PathBuf,
-    #[structopt(long = "mkltfs", help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="mkltfs")]
+    #[structopt(long = "mkltfs", help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="/usr/local/bin/mkltfs")]
     mkltfs: PathBuf,
     #[structopt(long = "umount", help = "Path to umount command", name="UMOUNT_PATH", default_value="umount")]
     umount: PathBuf,
@@ -161,8 +160,10 @@ struct Options {
     tapes: Vec<String>,
     #[structopt(long = "ignore-tape", help = "Regex patterns to ignore tapes with matching label", name="IGNORE_TAPE_REGEX", default_value="^CLN")]
     ignore_tape: Regex,
-    #[structopt(long = "verbose", help = "Run in verbose mode")]
+    #[structopt(long = "verbose", help = "Run in debug logging mode")]
     verbose: bool,
+    #[structopt(long = "trace", help = "Run in trace logging mode")]
+    trace: bool,
     #[structopt(subcommand)]
     cmd: Option<Command>,
 }
@@ -334,6 +335,21 @@ struct BackupContext {
     to_copy: LinkedList<NewFile>,
 }
 
+macro_rules! cmd {
+    ( $program:expr $(, $arg:expr )* $(,)? ) => {
+        {
+            use std::ffi::OsString;
+            use duct::IntoExecutablePath;
+            let args: std::vec::Vec<OsString> = std::vec![$( Into::<OsString>::into($arg) ),*];
+            let args_string: Vec<_> = args.iter().map(|a| shell_escape::unix::escape((*a).to_string_lossy())).collect();
+            debug!("Running command: {} {}", 
+                shell_escape::unix::escape($program.to_executable().to_string_lossy()), 
+                args_string.join(" "));
+            duct::cmd($program, args)
+        }
+    };
+}
+
 impl Options {
     // perl -ne '
     // Data Transfer Element (\d+):Empty/ && print "D:$1:E\n";
@@ -346,16 +362,12 @@ impl Options {
         debug!("Running loader_status");
         let mut elements = Vec::<StorageElement>::new();
         // mtx -f /dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0 status
-        let mtx_cmd = cmd!(&self.mtx, "-f", &self.loader, "status").run()?;
-        debug!("mtx_cmd: {mtx_cmd:#?}");
-        let code = match mtx_cmd.status.code() {
-            Some(c) => c.to_string(),
-            _ => "null".to_string(),
-        };
-        if ! mtx_cmd.status.success() {
-            Err(eyre!("mtx command {mtx_cmd:#?} failed with status {code}"))?
-        }
-        for line in mtx_cmd.stdout.lines() {
+        debug!("Running mtx status command");
+        let mtx_cmd = cmd!(&self.mtx, "-f", &self.loader, "status");
+        let reader = mtx_cmd.reader()?;
+        let reader = BufReader::new(reader);
+
+        for line in reader.lines() {
             let line = line?;
             debug!("mtx line: {line}");
             if let Some((_, drive_num)) = regex_captures!(r#"^\s*Data Transfer Element (\d+):Empty$"#, &line) {
@@ -372,7 +384,7 @@ impl Options {
             else if let Some((_, drive_num, storage_element_index, _, label)) = regex_captures!(r#"^\s*Data Transfer Element (\d+):Full \(Storage Element (\d+) Loaded\)(:VolumeTag =\s*(.+))?$"#, &line) {
                 let element = StorageElement {
                     index: drive_num.parse::<usize>()?,
-                    label: Some(label.to_string()),
+                    label: Some(label.trim_end().to_string()),
                     storage_type: StorageType::Drive,
                     status: StorageStatus::Full,
                     storage_element_index: Some(storage_element_index.parse::<usize>()?),
@@ -394,7 +406,7 @@ impl Options {
             else if let Some((_, storage_element_index, _, label)) = regex_captures!(r#"^\s*Storage Element (\d+):Full( :VolumeTag=(.+))?$"#, &line) {
                 let element = StorageElement {
                     index: storage_element_index.parse::<usize>()?,
-                    label: Some(label.to_string()),
+                    label: Some(label.trim_end().to_string()),
                     storage_type: StorageType::Element,
                     status: StorageStatus::Full,
                     storage_element_index: Some(storage_element_index.parse::<usize>()?),
@@ -416,7 +428,7 @@ impl Options {
             else if let Some((_, storage_element_index, _, label)) = regex_captures!(r#"^\s*Storage Element (\d+) IMPORT.EXPORT:Full( :VolumeTag=(.+))?$"#, &line) {
                 let element = StorageElement {
                     index: storage_element_index.parse::<usize>()?,
-                    label: Some(label.to_string()),
+                    label: Some(label.trim_end().to_string()),
                     storage_type: StorageType::ImportExport,
                     status: StorageStatus::Full,
                     storage_element_index: Some(storage_element_index.parse::<usize>()?),
@@ -519,9 +531,8 @@ impl Options {
         debug!("Running wait_for_drive");
         let mut drive_is_ready = false;
         for _ in 0..300 {
-            let cmd = cmd!("mt","-f", &self.drive, "status");
-            debug!("Running mt command: {cmd:#?}");
-            let drivestatus = cmd.run()?;
+            debug!("Running mt status command");
+            let drivestatus = cmd!("mt","-f", &self.drive, "status").run()?;
             if regex_is_match!(r#"ONLINE"#B, &drivestatus.stdout) {
                 debug!("Drive is ready");
                 drive_is_ready = true;
@@ -569,9 +580,8 @@ impl Options {
     fn unmount_tape(&self) -> Result<()> {
         debug!("Running unmount_tape");
         if self.is_mounted()? {
-            let cmd = cmd!(&self.umount, &self.ltfs_path);
-            debug!("Running unmount command: {cmd:#?}");
-            cmd.run()?;
+            debug!("Running umount command");
+            cmd!(&self.umount, &self.ltfs_path).run()?;
             self.wait_for_ltfs_process_to_terminate()?;
         }
         Ok(())
@@ -588,18 +598,16 @@ impl Options {
         if drive_slot.status == StorageStatus::Full {
             debug!("Drive slot is full");
             let empty_slot = ls.iter().
-                filter(|se| se.storage_type==StorageType::Drive && se.status==StorageStatus::Empty).
+                filter(|se| se.storage_type==StorageType::Element && se.status==StorageStatus::Empty).
                 next().ok_or(eyre!("Could not find an empty slot"))?;
             debug!("Found empty slot: {empty_slot:#?}");
             
             self.unmount_tape()?;
-            let cmd = cmd!(&self.mtx, "-f", &self.loader, "unload", empty_slot.index.to_string(), drive_slot.index.to_string());
-            debug!("Running unload commmand: {cmd:#?}");
-            cmd.run()?;
+            debug!("Running unload command");
+            cmd!(&self.mtx, "-f", &self.loader, "unload", empty_slot.index.to_string(), drive_slot.index.to_string()).run()?;
         }
-        let cmd = cmd!(&self.mtx, "-f", &self.loader, "load", slot.to_string(), drive_slot.index.to_string());
-        debug!("Running load commmand: {cmd:#?}");
-        cmd.run()?;
+        debug!("Running load commmand");
+        cmd!(&self.mtx, "-f", &self.loader, "load", slot.to_string(), drive_slot.index.to_string()).run()?;
         self.wait_for_drive()?;
         Ok(())
     }
@@ -607,9 +615,8 @@ impl Options {
     fn mount_tape(&self) -> Result<()> {
         debug!("Running mount_tape");
         if ! self.is_mounted()? {
-            let cmd = cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.drive.to_string_lossy()), &self.ltfs_path);
-            debug!("Running ltfs commmand: {cmd:#?}");
-            cmd.run()?;
+            debug!("Running ltfs commmand");
+            cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.drive.to_string_lossy()), &self.ltfs_path).run()?;
             if ! self.is_mounted()? {
                 Err(eyre!("path {ltfs_path} was not mounted", ltfs_path=self.ltfs_path.display()))?;
             }
@@ -665,10 +672,9 @@ impl Options {
                         // if no db record exists for tape, attempt to format the tape
                         // if tape is already formatted, formatting will fail
                         if !non_full_tapes.contains(label) {
-                            let cmd = cmd!(&self.mkltfs, "-d", &self.drive).unchecked();
                             debug!("Tape has no db record, try formatting it");
-                            debug!("Running mkltfs commmand: {cmd:#?}");
-                            let output = cmd.run()?;
+                            debug!("Running mkltfs commmand");
+                            let output = cmd!(&self.mkltfs, "-d", &self.drive).unchecked().run()?;
                             match output.status.code() {
                                 Some(16) => {
                                     debug!("mkltfs returned exit code 16, already formatted");
@@ -715,7 +721,7 @@ impl Options {
         );
         create table if not exists backup (
             id integer primary key autoincrement not null,
-            date_created timestamp default current_timestamp not null,
+            date_created integer default (unixepoch()) not null,
             uuid text not null,
             is_complete integer not null default false,
             parent_backup_id integer references backup(id)
@@ -1251,9 +1257,9 @@ impl Options {
                     next_file = ctx.to_copy.pop_front();
                 }
                 while let Some(file) = &next_file {
-                    debug!("Handling file {file:#?}");
+                    trace!("Handling file {file:#?}");
                     if let Ok(mut ctx) = ctx.lock() {
-                        debug!("Entered lock");
+                        trace!("Entered lock");
                         if let Some(file_name) = file.path.file_name() {
                             let file_path = PathBuf::from(file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
                             let file_path = file_path.strip_prefix("/").unwrap_or_else(|_| file_path.as_path());
@@ -1263,7 +1269,7 @@ impl Options {
                                 &file_path,
                             ].iter().collect::<PathBuf>();
                             // make sure dest path exists
-                            debug!("Create parent directories: {}", dest_path.to_string_lossy());
+                            trace!("Create parent directories: {}", dest_path.to_string_lossy());
                             if let Err(e) = std::fs::create_dir_all(&dest_path) {
                                 if self.is_tape_full()? {
                                     tape_full = true;
@@ -1277,6 +1283,7 @@ impl Options {
                             if ! backup_cmd.dry_run {
                                 if let Some(old_dir) = &old_dir {
                                     if dest_path != old_dir.0 {
+                                        trace!("old_dir changed from {old_dir:#?} to {dest_path}, setting mtime on old_dir", dest_path=dest_path.to_string_lossy());
                                         let mtime = FileTime::from_unix_time(old_dir.1, 0);
                                         if let Err(e) = filetime::set_file_times(&old_dir.0, mtime.clone(), mtime.clone()) {
                                             if self.is_tape_full()? {
@@ -1293,14 +1300,17 @@ impl Options {
                             // handle file types
                             match file.filetype {
                                 FileType::Directory => {
+                                    trace!("is a directory");
                                     let destdir = [
                                         &dest_path,
                                         &PathBuf::from(file_name),
                                     ].iter().collect::<PathBuf>();
+                                    trace!("destdir={destdir}", destdir=destdir.to_string_lossy());
 
                                     info!("{path}/ -> {destdir}/", path=file.path.to_string_lossy(), destdir=destdir.to_string_lossy());
                                     if ! backup_cmd.dry_run {
                                         // create the directory
+                                        trace!("create directory {destdir}", destdir=destdir.to_string_lossy());
                                         if let Err(e) = std::fs::create_dir(&destdir) {
                                             if self.is_tape_full()? {
                                                 tape_full = true;
@@ -1313,17 +1323,21 @@ impl Options {
                                     }
                                     // set old_dir so we can set the mtime later
                                     old_dir = Some((destdir.clone(), file.mtime));
+                                    trace!("set old_dir to {old_dir:#?}");
                                 },
                                 FileType::Symlink => {
+                                    trace!("is a symlink");
                                     // create the symlink
                                     let dest_file = [
                                         &dest_path, 
                                         &PathBuf::from(file_name),
                                     ].iter().collect::<PathBuf>();
+                                    trace!("dest_file={dest_file}", dest_file=dest_file.to_string_lossy());
 
                                     if let Some(target) = &file.symlink_target {
                                         info!("{path} -> {dest_file} ({target})", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy(), target=target.to_string_lossy());
                                         if ! backup_cmd.dry_run {
+                                            trace!("symlink {target} to {dest_file}", target=target.to_string_lossy(), dest_file=dest_file.to_string_lossy());
                                             if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
                                                 if self.is_tape_full()? {
                                                     tape_full = true;
@@ -1334,6 +1348,7 @@ impl Options {
                                                 }
                                             }
                                             // set the symlinks's mtime
+                                            trace!("set symlink {dest_file} mtime", dest_file=dest_file.to_string_lossy());
                                             let mtime = FileTime::from_unix_time(file.mtime, 0);
                                             if let Err(e) = filetime::set_symlink_file_times(&dest_file, mtime.clone(), mtime.clone()) {
                                                 if self.is_tape_full()? {
@@ -1352,6 +1367,7 @@ impl Options {
                                 },
                                 FileType::File => {
                                     // copy file to temp path first
+                                    trace!("is a file");
                                     let randext = rand::thread_rng()
                                         .sample_iter(&Alphanumeric)
                                         .take(10)
@@ -1363,19 +1379,23 @@ impl Options {
                                     tmp_file_name.extend(b".");
                                     tmp_file_name.extend(randext.as_bytes());
                                     let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
+                                    trace!("tmp_file_name={tmp_file_name}", tmp_file_name=tmp_file_name.to_string_lossy());
 
                                     let tmp_file = [
                                         &dest_path, 
                                         &tmp_file_name,
                                     ].iter().collect::<PathBuf>();
+                                    trace!("tmp_file={tmp_file}", tmp_file=tmp_file.to_string_lossy());
 
                                     let dest_file = [
                                         &dest_path, 
                                         &PathBuf::from(file_name),
                                     ].iter().collect::<PathBuf>();
+                                    trace!("dest_file={dest_file}", dest_file=dest_file.to_string_lossy());
 
                                     info!("{path} -> {dest_file}", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy());
                                     if ! backup_cmd.dry_run {
+                                        trace!("copy {file_path} to {tmp_file}", file_path=file.path.to_string_lossy(), tmp_file=tmp_file.to_string_lossy());
                                         if let Err(e) = std::fs::copy(&file.path, &tmp_file) {
                                             if self.is_tape_full()? {
                                                 tape_full = true;
@@ -1390,6 +1410,7 @@ impl Options {
                                             }
                                         }
                                         // set the file's mtime
+                                        trace!("set mtime on {tmp_file}", tmp_file=tmp_file.to_string_lossy());
                                         let mtime = FileTime::from_unix_time(file.mtime, 0);
                                         if let Err(e) = filetime::set_file_times( &tmp_file, mtime.clone(), mtime.clone()) {
                                             if self.is_tape_full()? {
@@ -1401,6 +1422,7 @@ impl Options {
                                             }
                                         }
                                         // then move file into place
+                                        trace!("move {tmp_file} to {dest_file}", tmp_file=tmp_file.to_string_lossy(), dest_file=dest_file.to_string_lossy());
                                         if let Err(e) = std::fs::rename(&tmp_file, dest_file) {
                                             if self.is_tape_full()? {
                                                 tape_full = true;
@@ -1563,6 +1585,7 @@ impl Options {
                 Err(eyre!("No backup record set"))?
             }
         }
+        info!("Backup complete");
         Ok(())
     }
 
@@ -1901,6 +1924,7 @@ impl Options {
         else {
             Err(eyre!("No backup found matching backup_id {backup_id:#?}", backup_id=restore_cmd.backup_id))?
         }
+        info!("Restore complete");
         Ok(())
     }
 
@@ -2194,25 +2218,31 @@ fn main() -> Result<()> {
 
     let mut options = Options::from_args();
 
-    let logspec = if options.verbose {"DEBUG"} else {"INFO"};
+    let logspec = if options.trace {"TRACE"} else if options.verbose {"DEBUG"} else {"INFO"};
     Logger::try_with_env_or_str(logspec)?.start()?;
     debug!("Parsed options: {options:#?}");
 
-    if let Err(e) = which(&options.mtx) {
-        Err(eyre!("Could not find mtx program: {mtx}: {e}", mtx=options.mtx.display()))?
-    }
-    if let Err(e) = which(&options.mt) {
-        Err(eyre!("Could not find mt program: {mt}: {e}", mt=options.mt.display()))?
-    }
-    if let Err(e) = which(&options.ltfs) {
-        Err(eyre!("Could not find ltfs program: {ltfs}: {e}", ltfs=options.ltfs.display()))?
-    }
-    if let Err(e) = which(&options.mkltfs) {
-        Err(eyre!("Could not find mkltfs program: {mkltfs}: {e}", mkltfs=options.mkltfs.display()))?
-    }
-    if let Err(e) = which(&options.umount) {
-        Err(eyre!("Could not find umount program: {umount}: {e}", umount=options.umount.display()))?
-    }
+    options.mtx = match which(&options.mtx) {
+        Ok(path) => path,
+        Err(e) => Err(eyre!("Could not find mtx program: {mtx}: {e}", mtx=options.mtx.display()))?,
+    };
+    options.mt = match which(&options.mt) {
+        Ok(path) => path,
+        Err(e) => Err(eyre!("Could not find mt program: {mt}: {e}", mt=options.mt.display()))?,
+    };
+    options.ltfs = match which(&options.ltfs) {
+        Ok(path) => path,
+        Err(e) => Err(eyre!("Could not find ltfs program: {ltfs}: {e}", ltfs=options.ltfs.display()))?,
+    };
+    options.mkltfs = match which(&options.mkltfs) {
+        Ok(path) => path,
+        Err(e) => Err(eyre!("Could not find ltfs program: {mkltfs}: {e}", mkltfs=options.mkltfs.display()))?,
+    };
+    options.mkltfs = match which(&options.umount) {
+        Ok(path) => path,
+        Err(e) => Err(eyre!("Could not find umount program: {umount}: {e}", umount=options.umount.display()))?,
+    };
+
     if ! options.drive.exists() {
         Err(eyre!("Could not find drive device: {drive}", drive=options.drive.display()))?
     }
