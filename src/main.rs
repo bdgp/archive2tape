@@ -47,9 +47,9 @@ use serde_derive::{Deserialize, Serialize};
 
 #[derive(StructOpt, Debug)]
 struct BackupCmd {
-    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
     include: Vec<Pattern>,
-    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
     exclude: Vec<Pattern>,
     #[structopt(long = "include-regex", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include_regex: Vec<regex::bytes::Regex>,
@@ -75,9 +75,9 @@ struct RestoreCmd {
     backup_uuid: Option<String>,
     #[structopt(long = "backup-date", help = "Backup date to use for restore (default is latest backup)", name="BACKUP_DATETIME")]
     backup_date: Option<String>,
-    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
     include: Vec<Pattern>,
-    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
     exclude: Vec<Pattern>,
     #[structopt(long = "include-regex", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include_regex: Vec<regex::bytes::Regex>,
@@ -111,9 +111,9 @@ struct ListFilesCmd {
     backup_uuid: Option<String>,
     #[structopt(long = "backup-date", help = "Backup date to search", name="BACKUP_DATETIME")]
     backup_date: Option<String>,
-    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
     include: Vec<Pattern>,
-    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
     exclude: Vec<Pattern>,
     #[structopt(long = "include-regex", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include_regex: Vec<regex::bytes::Regex>,
@@ -877,6 +877,7 @@ impl Options {
                 debug!("Running sql query:\n{sql}\n");
                 tx.execute_batch(sql)?;
                 {
+                    info!("Scanning for files to backup...");
                     debug!("Inserting new_file records");
                     let sql = "insert into new_file (path,mtime,size,uid,gid,mode,filetype,symlink_target) values (:path,:mtime,:size,:uid,:gid,:mode,:filetype,:symlink_target) on conflict(path) do nothing";
                     let mut stmt = tx.prepare(sql)?;
@@ -933,7 +934,8 @@ impl Options {
                                     }
                                 }
                                 // insert the new_file record
-                                let attr = std::fs::metadata(&entry)?;
+                                //debug!("Found file to backup: {path}", path=entry.to_string_lossy());
+                                let attr = std::fs::symlink_metadata(&entry)?;
                                 stmt.execute(serde_rusqlite::to_params_named_with_fields(&NewFile {
                                     id: 0,
                                     path: PathBuf::from(entry),
@@ -984,7 +986,27 @@ impl Options {
                         and pb.depth <= pb2.depth
                       group by 1,2,3,4,5,6,7,8,9,10,11,12
                       having count(*)=1)
-                    select nf.*, fb.*
+                    select nf.id as new_file_id,
+                      nf.path as new_file_path,
+                      nf.mtime as new_file_mtime,
+                      nf.size as new_file_size,
+                      nf.uid as new_file_uid,
+                      nf.gid as new_file_gid,
+                      nf.mode as new_file_mode,
+                      nf.filetype as new_file_filetype,
+                      nf.symlink_target as new_file_symlink_target,
+                      fb.backup_id as full_backup_backup_id,
+                      fb.uid as full_backup_uid,
+                      fb.gid as full_backup_gid,
+                      fb.mode as full_backup_mode,
+                      fb.is_deleted as full_backup_is_deleted,
+                      fb.file_id as full_backup_file_id,
+                      fb.tape_id as full_backup_tape_id,
+                      fb.path as full_backup_path,
+                      fb.mtime as full_backup_mtime,
+                      fb.size as full_backup_size,
+                      fb.filetype as full_backup_filetype,
+                      fb.symlink_target as full_backup_symlink_target
                     from new_file nf
                     left join full_backup fb
                       on fb.path=nf.path
@@ -994,7 +1016,27 @@ impl Options {
                     where (fb.path is null or fb.is_deleted) 
                       and nf.path is not null
                     union all
-                    select nf.*, fb.*
+                    select nf.id as new_file_id,
+                      nf.path as new_file_path,
+                      nf.mtime as new_file_mtime,
+                      nf.size as new_file_size,
+                      nf.uid as new_file_uid,
+                      nf.gid as new_file_gid,
+                      nf.mode as new_file_mode,
+                      nf.filetype as new_file_filetype,
+                      nf.symlink_target as new_file_symlink_target,
+                      fb.backup_id as full_backup_backup_id,
+                      fb.uid as full_backup_uid,
+                      fb.gid as full_backup_gid,
+                      fb.mode as full_backup_mode,
+                      fb.is_deleted as full_backup_is_deleted,
+                      fb.file_id as full_backup_file_id,
+                      fb.tape_id as full_backup_tape_id,
+                      fb.path as full_backup_path,
+                      fb.mtime as full_backup_mtime,
+                      fb.size as full_backup_size,
+                      fb.filetype as full_backup_filetype,
+                      fb.symlink_target as full_backup_symlink_target
                     from full_backup fb
                     left join new_file nf
                       on fb.path=nf.path
@@ -1401,7 +1443,7 @@ impl Options {
                                     match new_file.filetype {
                                         FileType::File => {
                                             if path.is_file() {
-                                                if let Ok(md) = std::fs::metadata(&dest) {
+                                                if let Ok(md) = std::fs::symlink_metadata(&dest) {
                                                     if md.size() == new_file.size && md.mtime() == new_file.mtime {
                                                         file_exists = true;
                                                     }
@@ -1679,7 +1721,7 @@ impl Options {
                         if ! restore_cmd.dry_run {
                             nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode))?;
                             nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
-                            if let Ok(md) = std::fs::metadata(&dest) {
+                            if let Ok(md) = std::fs::symlink_metadata(&dest) {
                                 let current_mtime = FileTime::from_last_modification_time(&md);
                                 mtime = std::cmp::max(mtime, current_mtime.unix_seconds());
                             }
@@ -1712,7 +1754,7 @@ impl Options {
                             }
 
                             // if mtime and size is the same, skip copying the file
-                            let attr = std::fs::metadata(&dest)?;
+                            let attr = std::fs::symlink_metadata(&dest)?;
                             if dest.is_file() && attr.mtime() == full_backup.mtime && attr.size() == full_backup.size {
                                 if ! restore_cmd.dry_run {
                                     // set uid:gid
@@ -2088,7 +2130,7 @@ impl Options {
 
 fn main() -> Result<()> {
     std::env::set_var("RUST_BACKTRACE", "full");
-    std::env::set_var("RUST_LIB_BACKTRACE", "1");
+    color_eyre::install()?;
 
     let mut options = Options::from_args();
 

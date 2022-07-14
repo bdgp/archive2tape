@@ -10,7 +10,7 @@ clap = "*"
 structopt = "*"
 structopt-derive = "*"
 duct = "*"
-eyre = "*"
+stable-eyre = "*"
 color-eyre = "*"
 glob = "*"
 lazy_static = "*"
@@ -44,8 +44,12 @@ features = [ "v4" ]
 version = "*"
 features = [ "bundled" ]
 
+
 #[profile.dev]
 #opt-level = 2
+
+[profile.dev.package.backtrace]
+opt-level = 3
 
 [[bin]]
 name = "archive2tape"

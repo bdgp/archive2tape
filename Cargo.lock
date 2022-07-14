@@ -144,9 +144,9 @@ dependencies = [
 
 [[package]]
 name = "color-eyre"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ebf286c900a6d5867aeff75cfee3192857bb7f24b547d4f0df2ed6baa812c90"
+checksum = "5a667583cca8c4f8436db8de46ea8233c42a7d9ae424a82d338f2e4675229204"
 dependencies = [
  "backtrace",
  "color-spantrace",
@@ -872,6 +872,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fd0db749597d91ff862fd1d55ea87f7855a744a8425a64695b6fca237d1dad1"
 
 [[package]]
+name = "stable-eyre"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "556fec8c2da34c70b75f16d88df8a8cd7e652e567ff097b7e9df0022c8695cc4"
+dependencies = [
+ "backtrace",
+ "eyre",
+ "indenter",
+]
+
+[[package]]
 name = "stfu8"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -948,7 +959,6 @@ dependencies = [
  "ctrlc",
  "dateparser",
  "duct",
- "eyre",
  "file-mode",
  "filetime",
  "flexi_logger",
@@ -965,6 +975,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_rusqlite",
+ "stable-eyre",
  "stfu8",
  "structopt",
  "structopt-derive",
