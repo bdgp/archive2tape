@@ -12,6 +12,7 @@ use num_enum::{TryFromPrimitive, IntoPrimitive};
 use regex::Regex;
 use glob::Pattern;
 
+use serde::{Serializer, Deserializer, Deserialize, de};
 use structopt::StructOpt;
 use std::vec::Vec;
 use duct::cmd;
@@ -167,14 +168,6 @@ enum StorageStatus {
     Full,
 }
 
-#[derive(PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize)]
-#[repr(u8)]
-enum FileType {
-    File = 0,
-    Directory = 1,
-    Symlink = 2,
-}
-
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
 struct StorageElement {
     index: usize,
@@ -192,14 +185,64 @@ struct Tape {
     date_added: String,
 }
 
+#[derive(PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize)]
+#[repr(u8)]
+enum FileType {
+    File = 0,
+    Directory = 1,
+    Symlink = 2,
+}
+
+fn pathbuf_serialize<S>(x: &PathBuf, s: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    s.serialize_str(&stfu8::encode_u8_pretty(x.as_os_str().as_bytes()))
+}
+
+fn pathbuf_deserialize<'de, D>(deserializer: D) -> Result<PathBuf, D::Error>
+where D: Deserializer<'de> {
+    let s: &str = Deserialize::deserialize(deserializer)?;
+    Ok(PathBuf::from(OsString::from_vec(stfu8::decode_u8(s).map_err(de::Error::custom)?)))
+}
+
+fn option_pathbuf_serialize<S>(x: &Option<PathBuf>, s: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    match x {
+        Some(x) => s.serialize_some(&stfu8::encode_u8_pretty(x.as_os_str().as_bytes())),
+        None => s.serialize_none(),
+    }
+}
+
+fn option_pathbuf_deserialize<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
+where D: Deserializer<'de> {
+    let s: Option<&str> = Deserialize::deserialize(deserializer)?;
+    match s {
+        Some(s) => Ok(Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(s).map_err(de::Error::custom)?)))),
+        None => Ok(None),
+    }
+}
+
+fn filetype_serialize<S>(x: &FileType, s: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    s.serialize_u8(*x as u8)
+}
+
+fn filetype_deserialize<'de, D>(deserializer: D) -> Result<FileType, D::Error>
+where D: Deserializer<'de> {
+    let i: u8 = Deserialize::deserialize(deserializer)?;
+    Ok(FileType::try_from(i).map_err(de::Error::custom)?)
+}
+
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct File {
     id: i64,
     tape_id: i64,
+    #[serde(serialize_with = "pathbuf_serialize")]
+    #[serde(deserialize_with = "pathbuf_deserialize")]
     path: PathBuf,
     mtime: i64,
     size: u64,
+    #[serde(serialize_with = "filetype_serialize")]
+    #[serde(deserialize_with = "filetype_deserialize")]
     filetype: FileType,
+    #[serde(serialize_with = "option_pathbuf_serialize")]
+    #[serde(deserialize_with = "option_pathbuf_deserialize")]
     symlink_target: Option<PathBuf>,
 }
 
@@ -225,13 +268,19 @@ struct Backup2File {
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct NewFile {
     id: i64,
+    #[serde(serialize_with = "pathbuf_serialize")]
+    #[serde(deserialize_with = "pathbuf_deserialize")]
     path: PathBuf,
     mtime: i64,
     size: u64,
     uid: u32,
     gid: u32,
     mode: u32,
+    #[serde(serialize_with = "filetype_serialize")]
+    #[serde(deserialize_with = "filetype_deserialize")]
     filetype: FileType,
+    #[serde(serialize_with = "option_pathbuf_serialize")]
+    #[serde(deserialize_with = "option_pathbuf_deserialize")]
     symlink_target: Option<PathBuf>,
 }
 
@@ -244,18 +293,25 @@ struct FullBackup {
     is_deleted: bool,
     file_id: i64,
     tape_id: i64,
+    #[serde(serialize_with = "pathbuf_serialize")]
+    #[serde(deserialize_with = "pathbuf_deserialize")]
     path: PathBuf,
     mtime: i64,
     size: u64,
+    #[serde(serialize_with = "filetype_serialize")]
+    #[serde(deserialize_with = "filetype_deserialize")]
     filetype: FileType,
+    #[serde(serialize_with = "option_pathbuf_serialize")]
+    #[serde(deserialize_with = "option_pathbuf_deserialize")]
     symlink_target: Option<PathBuf>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct BackupDiff {
-    new_file: Option<NewFile>,
-    full_backup: Option<FullBackup>,
+    new_file: NewFile,
+    full_backup: FullBackup,
 }
+
 
 #[derive(Debug)]
 struct BackupContext {
@@ -887,12 +943,13 @@ impl Options {
                     debug!("Running sql:\n{sql}\n");
                     let mut stmt = tx.prepare(sql)?;
                     let mut rows_iter = serde_rusqlite::from_rows::<BackupDiff>(stmt.query(params![parent_backup_id])?);
+                    let empty_pathbuf = PathBuf::from("");
                     while let Some(backup_diff) = rows_iter.next() {
                         let backup_diff = backup_diff?;
-                        if let Some(new_file) = &backup_diff.new_file {
-                            if backup_diff.full_backup.is_none() {
+                        if backup_diff.new_file.path != empty_pathbuf {
+                            if backup_diff.full_backup.path == empty_pathbuf {
                                 // add new_file record to to_copy
-                                to_copy.push(new_file.clone());
+                                to_copy.push(backup_diff.new_file.clone());
                             }
                         }
                         // add backup_diff record to backup_diffs
@@ -915,17 +972,18 @@ impl Options {
                     {
                         let mut count = 0;
                         let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
+                        let empty_pathbuf = PathBuf::from("");
                         for backup_diff in &backup_diffs {
-                            if let Some(full_backup) = &backup_diff.full_backup {
+                            if backup_diff.full_backup.path != empty_pathbuf {
                                 // creating a new db record using already backed up file
                                 // don't need to transfer anything
-                                if let Some(new_file) = &backup_diff.new_file {
+                                if backup_diff.new_file.path != empty_pathbuf {
                                     b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
                                         backup_id: *backup_id,
-                                        file_id: full_backup.file_id,
-                                        uid: new_file.uid,
-                                        gid: new_file.gid,
-                                        mode: new_file.mode,
+                                        file_id: backup_diff.full_backup.file_id,
+                                        uid: backup_diff.new_file.uid,
+                                        gid: backup_diff.new_file.gid,
+                                        mode: backup_diff.new_file.mode,
                                         is_deleted: false,
                                     })?.to_slice().as_slice())?;
                                     count += 1;
@@ -934,10 +992,10 @@ impl Options {
                                 else {
                                     b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
                                         backup_id: *backup_id,
-                                        file_id: full_backup.file_id,
-                                        uid: full_backup.uid,
-                                        gid: full_backup.gid,
-                                        mode: full_backup.mode,
+                                        file_id: backup_diff.full_backup.file_id,
+                                        uid: backup_diff.full_backup.uid,
+                                        gid: backup_diff.full_backup.gid,
+                                        mode: backup_diff.full_backup.mode,
                                         is_deleted: true,
                                     })?.to_slice().as_slice())?;
                                     count += 1;
