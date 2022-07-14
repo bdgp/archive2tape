@@ -649,7 +649,8 @@ impl Options {
             path text not null,
             mtime integer not null,
             size integer not null,
-            filetype integer not null
+            filetype integer not null,
+            symlink_target text
         );
         create index if not exists file_path_mtime_size_idx on file (path,mtime,size);
         create table if not exists backup2file (
@@ -835,42 +836,52 @@ impl Options {
                     // get the complete list of backup diffs from the db
                     let sql = r#"
                     with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
-                        select id, date_created, uuid, parent_backup_id, 0 as depth
-                        from backup
-                        where id = ?1
-                        union all
-                        select id, date_created, uuid, parent_backup_id, pb.depth+1 as depth
-                        from backup b
-                        join parent_backup pb 
-                        on pb.parent_backup_id = b.id) 
-                    with full_backup(backup_id, uid, gid, mode, is_deleted, file_id, tape_id, path, mtime, size, filetype) as materialized (
-                    select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target
-                    from (parent_backup pb
+                      select id, date_created, uuid, parent_backup_id, 0 as depth
+                      from backup
+                      where id = ?1
+                      union all
+                      select b.id, b.date_created, b.uuid, b.parent_backup_id, pb.depth+1 as depth
+                      from backup b
+                      join parent_backup pb 
+                        on pb.parent_backup_id = b.id),
+                    full_backup(backup_id, uid, gid, mode, is_deleted, file_id, tape_id, path, mtime, size, filetype, symlink_target) as materialized (
+                      select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target
+                      from (parent_backup pb
                         join backup2file b2f
-                        on b2f.parent_backup_id = pb.id
+                          on b2f.backup_id = pb.id
                         join file f
-                        on b2f.file_id=f.id)
-                    join (parent_backup pb2
+                          on b2f.file_id=f.id)
+                      join (parent_backup pb2
                         join backup2file b2f2
-                        on b2f2.parent_backup_id=pb2.id
+                          on b2f2.backup_id=pb2.id
                         join file f2
-                        on b2f2.file_id=f2.id)
-                    on f.path=f2.path
+                          on b2f2.file_id=f2.id)
+                      on f.path=f2.path
                         and f.mtime=f2.mtime
                         and f.size=f2.size
                         and f.filetype=f2.filetype
-                        and b2f.depth <= b2f2.depth
-                    group by 1,2,3,4,5,6,7,8,9,10,11,12
-                    having count(*)=1)
-                    select *
+                        and pb.depth <= pb2.depth
+                      group by 1,2,3,4,5,6,7,8,9,10,11,12
+                      having count(*)=1)
+                    select nf.*, fb.*
                     from new_file nf
-                    full join full_backup fb
-                    on fb.path=nf.path
-                    and fb.mtime=nf.mtime
-                    and fb.size=nf.size
-                    and fb.filetype=nf.filetype
-                    where ((fb.path is null or fb.is_deleted) and nf.path is not null)
-                    or (fb.path is not null and nf.path is null)
+                    left join full_backup fb
+                      on fb.path=nf.path
+                      and fb.mtime=nf.mtime
+                      and fb.size=nf.size
+                      and fb.filetype=nf.filetype
+                    where (fb.path is null or fb.is_deleted) 
+                      and nf.path is not null
+                    union all
+                    select nf.*, fb.*
+                    from full_backup fb
+                    left join new_file nf
+                      on fb.path=nf.path
+                      and fb.mtime=nf.mtime
+                      and fb.size=nf.size
+                      and fb.filetype=nf.filetype
+                    where fb.path is not null 
+                      and nf.path is null
                     order by nf.path nulls last, fb.path nulls last
                     "#;
                     debug!("Running sql:\n{sql}\n");
@@ -1471,30 +1482,30 @@ impl Options {
             // get the complete list of backup records from the db
             let sql = r#"
             with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
-                select id, date_created, uuid, parent_backup_id, 0 as depth
-                from backup
-                where id = ?1
-                union all
-                select id, date_created, uuid, parent_backup_id, pb.depth+1 as depth
-                from backup b
-                join parent_backup pb 
-                    on pb.parent_backup_id = b.id) 
+              select id, date_created, uuid, parent_backup_id, 0 as depth
+              from backup
+              where id = ?1
+              union all
+              select b.id, b.date_created, b.uuid, b.parent_backup_id, pb.depth+1 as depth
+              from backup b
+              join parent_backup pb 
+                on pb.parent_backup_id = b.id) 
             select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target
             from (parent_backup pb
-                join backup2file b2f
-                on b2f.parent_backup_id = pb.id
-                join file f
+              join backup2file b2f
+                on b2f.backup_id = pb.id
+              join file f
                 on b2f.file_id=f.id)
             join (parent_backup pb2
-                join backup2file b2f2
-                on b2f2.parent_backup_id=pb2.id
-                join file f2
+              join backup2file b2f2
+                on b2f2.backup_id=pb2.id
+              join file f2
                 on b2f2.file_id=f2.id)
             on f.path=f2.path
-                and f.mtime=f2.mtime
-                and f.size=f2.size
-                and f.filetype=f2.filetype
-                and b2f.depth <= b2f2.depth
+              and f.mtime=f2.mtime
+              and f.size=f2.size
+              and f.filetype=f2.filetype
+              and pb.depth <= pb2.depth
             group by 1,2,3,4,5,6,7,8,9,10,11,12
             having count(*)=1
             order by f.tape_id nulls last, f.path nulls last
@@ -1875,30 +1886,30 @@ impl Options {
             debug!("Using backup record: {backup:#?}");
             let sql = r#"
             with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
-                select id, date_created, uuid, parent_backup_id, 0 as depth
-                from backup
-                where id = ?1
-                union all
-                select id, date_created, uuid, parent_backup_id, pb.depth+1 as depth
-                from backup b
-                join parent_backup pb 
-                    on pb.parent_backup_id = b.id) 
+              select id, date_created, uuid, parent_backup_id, 0 as depth
+              from backup
+              where id = ?1
+              union all
+              select b.id, b.date_created, b.uuid, b.parent_backup_id, pb.depth+1 as depth
+              from backup b
+              join parent_backup pb 
+                on pb.parent_backup_id = b.id) 
             select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target
             from (parent_backup pb
-                join backup2file b2f
-                on b2f.parent_backup_id = pb.id
-                join file f
+              join backup2file b2f
+                on b2f.backup_id = pb.id
+              join file f
                 on b2f.file_id=f.id)
             join (parent_backup pb2
-                join backup2file b2f2
-                on b2f2.parent_backup_id=pb2.id
-                join file f2
+              join backup2file b2f2
+                on b2f2.backup_id=pb2.id
+              join file f2
                 on b2f2.file_id=f2.id)
             on f.path=f2.path
-                and f.mtime=f2.mtime
-                and f.size=f2.size
-                and f.filetype=f2.filetype
-                and b2f.depth <= b2f2.depth
+              and f.mtime=f2.mtime
+              and f.size=f2.size
+              and f.filetype=f2.filetype
+              and pb.depth <= pb2.depth
             group by 1,2,3,4,5,6,7,8,9,10,11,12
             having count(*)=1
             order by f.path nulls last
