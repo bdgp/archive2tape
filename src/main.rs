@@ -1459,6 +1459,7 @@ impl Options {
             let rows = stmt.query([&backup.id])?;
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
             while let Some(full_backup) = rows_iter.next() {
+                let full_backup = full_backup?;
                 if ! restore_cmd.patterns.is_empty() {
                     let mut found_match = false;
                     for pattern in &restore_cmd.patterns {
@@ -1691,7 +1692,7 @@ impl Options {
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(&sql)?;
             let cols = stmt.column_names().iter().map(|c| c.to_string()).collect::<Vec<_>>();
-            let mut rows = if list_backups_cmd.backup_id.is_some() || list_backups_cmd.backup_uuid.is_some() || list_backups_cmd.backup_date.is_some() {
+            let rows = if list_backups_cmd.backup_id.is_some() || list_backups_cmd.backup_uuid.is_some() || list_backups_cmd.backup_date.is_some() {
                 let backup_date = list_backups_cmd.backup_date.clone().map(|bd| 
                     bd.parse::<dateparser::DateTimeUtc>().ok().map(|d| 
                         d.0.timestamp())
@@ -1827,7 +1828,7 @@ impl Options {
             "#;
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(sql)?;
-            let mut rows = stmt.query([&backup.id])?;
+            let rows = stmt.query([&backup.id])?;
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
