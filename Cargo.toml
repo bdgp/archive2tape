@@ -32,6 +32,9 @@ users = "*"
 log = "*"
 flexi_logger = "*"
 ctrlc = "*"
+serde = "*"
+serde_rusqlite = "*"
+serde_derive = "*"
 
 [dependencies.uuid]
 version = "*"

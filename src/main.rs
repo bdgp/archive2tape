@@ -36,6 +36,7 @@ use users::{Users, Groups};
 
 use log::{info, debug};
 use flexi_logger::Logger;
+use serde_derive::{Deserialize, Serialize};
 
 // /dev/sg0 lto5 drive
 // /dev/sg1 lto5 loader
@@ -166,7 +167,7 @@ enum StorageStatus {
     Full,
 }
 
-#[derive(PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, IntoPrimitive, TryFromPrimitive)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize)]
 #[repr(u8)]
 enum FileType {
     File = 0,
@@ -183,7 +184,7 @@ struct StorageElement {
     storage_element_index: Option<usize>,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct Tape {
     id: i64,
     label: String,
@@ -191,20 +192,18 @@ struct Tape {
     date_added: String,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct File {
     id: i64,
+    tape_id: i64,
     path: PathBuf,
-    uid: u32,
-    gid: u32,
-    mode: u32,
     mtime: i64,
     size: u64,
     filetype: FileType,
     symlink_target: Option<PathBuf>,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct Backup {
     id: i64,
     date_created: i64,
@@ -213,7 +212,17 @@ struct Backup {
     is_complete: bool,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+struct Backup2File {
+    backup_id: i64,
+    file_id: i64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    is_deleted: bool,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct NewFile {
     id: i64,
     path: PathBuf,
@@ -226,7 +235,7 @@ struct NewFile {
     symlink_target: Option<PathBuf>,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct FullBackup {
     backup_id: i64,
     uid: u32,
@@ -242,7 +251,7 @@ struct FullBackup {
     symlink_target: Option<PathBuf>,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct BackupDiff {
     new_file: Option<NewFile>,
     full_backup: Option<FullBackup>,
@@ -699,15 +708,10 @@ impl Options {
         let mut tapes = LinkedHashMap::<String,Tape>::new();
         {
             let mut stmt = conn.prepare("select * from tape")?;
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let label: String = row.get(1)?;
-                tapes.insert(label.clone(), Tape{
-                    id: row.get(0)?,
-                    label: label,
-                    is_full: row.get(2)?,
-                    date_added: row.get(3)?,
-                });
+            let mut rows_iter = serde_rusqlite::from_rows::<Tape>(stmt.query([])?);
+            while let Some(tape) = rows_iter.next() {
+                let tape = tape?;
+                tapes.insert(tape.label.clone(), tape);
             }
         }
         debug!("got tapes records: {tapes:#?}");
@@ -732,16 +736,11 @@ impl Options {
             let sql = r#"insert into backup (uuid,parent_backup_id) values (?1,?2) returning *"#;
             debug!("Running query: {sql}");
             let mut stmt = conn.prepare(sql)?;
-            let mut rows = stmt.query(params![backup_uuid.to_string(), parent_backup_id])?;
-            if let Some(row) = rows.next()? {
-                parent_backup_id = Some(row.get(0)?);
-                backup = Some(Backup {
-                    id: row.get(0)?,
-                    date_created: row.get(1)?,
-                    uuid: row.get(2)?,
-                    parent_backup_id: row.get(3)?,
-                    is_complete: row.get(4)?,
-                });
+            let rows = stmt.query(params![backup_uuid.to_string(), parent_backup_id])?;
+            let mut rows_iter = serde_rusqlite::from_rows::<Backup>(rows);
+            if let Some(backup_record) = rows_iter.next() {
+                let backup_record = backup_record?;
+                backup = Some(backup_record);
             }
         }
         debug!("Created backup record: {backup:#?}");
@@ -780,7 +779,7 @@ impl Options {
                 tx.execute_batch(sql)?;
                 {
                     debug!("Inserting new_file records");
-                    let sql = "insert into new_file (path,mtime,size,uid,gid,mode,filetype,symlink_target) values (?1,?2,?3,?4,?5,?6,?7,?8)";
+                    let sql = "insert into new_file (path,mtime,size,uid,gid,mode,filetype,symlink_target) values (:path,:mtime,:size,:uid,:gid,:mode,:filetype,:symlink_target)";
                     let mut stmt = tx.prepare(sql)?;
                     let mut count = 0;
                     // use the glob patterns to produce a list of files
@@ -815,16 +814,17 @@ impl Options {
                             }
                             // insert the new_file record
                             let attr = std::fs::metadata(&entry)?;
-                            stmt.execute(params![
-                                stfu8::encode_u8_pretty(entry.as_os_str().as_bytes()),
-                                attr.mtime(),
-                                attr.size(),
-                                attr.uid(),
-                                attr.gid(),
-                                attr.mode(),
-                                (if entry.is_dir() {FileType::Directory} else if entry.is_symlink() {FileType::Symlink} else {FileType::File}) as u8,
-                                if entry.is_symlink() {Some(stfu8::encode_u8_pretty(std::fs::read_link(&entry)?.as_os_str().as_bytes()))} else {None},
-                            ])?;
+                            stmt.execute(serde_rusqlite::to_params_named_with_fields(&NewFile {
+                                id: 0,
+                                path: entry.clone(),
+                                mtime: attr.mtime(),
+                                size: attr.size(),
+                                uid: attr.uid(),
+                                gid: attr.gid(),
+                                mode: attr.mode(),
+                                filetype: if entry.is_dir() {FileType::Directory} else if entry.is_symlink() {FileType::Symlink} else {FileType::File},
+                                symlink_target: if entry.is_symlink() {Some(std::fs::read_link(&entry)?)} else {None},
+                            }, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
                             count += 1;
                             if count % 1000 == 0 {
                                 debug!("Inserted {count} records");
@@ -886,41 +886,9 @@ impl Options {
                     "#;
                     debug!("Running sql:\n{sql}\n");
                     let mut stmt = tx.prepare(sql)?;
-                    let mut rows = stmt.query([parent_backup_id])?;
-                    while let Some(row) = rows.next()? {
-                        let path: Option<String> = row.get(1)?;
-                        let path2: Option<String> = row.get(16)?;
-                        let symlink_target: Option<String> = row.get(8)?;
-                        let symlink_target2: Option<String> = row.get(20)?;
-                        let filetype: u8 = row.get(6)?;
-                        let filetype2: u8 = row.get(19)?;
-                        let backup_diff = BackupDiff{
-                            new_file: if let Some(path) = path{Some(NewFile{
-                                id: row.get(0)?,
-                                path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&path)?)),
-                                mtime: row.get(2)?,
-                                size: row.get(3)?,
-                                uid: row.get(4)?,
-                                gid: row.get(5)?,
-                                mode: row.get(6)?,
-                                filetype: FileType::try_from(filetype)?,
-                                symlink_target: if let Some(s) = symlink_target {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&s)?)))} else {None},
-                            })} else {None},
-                            full_backup: if let Some(path2) = path2 {Some(FullBackup {
-                                backup_id: row.get(9)?,
-                                uid: row.get(10)?,
-                                gid: row.get(11)?,
-                                mode: row.get(12)?,
-                                is_deleted: row.get(13)?,
-                                file_id: row.get(14)?,
-                                tape_id: row.get(15)?,
-                                path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&path2)?)),
-                                mtime: row.get(17)?,
-                                size: row.get(18)?,
-                                filetype: FileType::try_from(filetype2)?,
-                                symlink_target: if let Some(s) = symlink_target2 {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&s)?)))} else {None},
-                            })} else {None},
-                        };
+                    let mut rows_iter = serde_rusqlite::from_rows::<BackupDiff>(stmt.query(params![parent_backup_id])?);
+                    while let Some(backup_diff) = rows_iter.next() {
+                        let backup_diff = backup_diff?;
                         if let Some(new_file) = &backup_diff.new_file {
                             if backup_diff.full_backup.is_none() {
                                 // add new_file record to to_copy
@@ -946,34 +914,32 @@ impl Options {
                     let tx = conn.transaction()?;
                     {
                         let mut count = 0;
-                        let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (?1,?2,?3,?4,?5,?6)"#)?;
+                        let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
                         for backup_diff in &backup_diffs {
                             if let Some(full_backup) = &backup_diff.full_backup {
                                 // creating a new db record using already backed up file
                                 // don't need to transfer anything
                                 if let Some(new_file) = &backup_diff.new_file {
-                                    let is_deleted = false;
-                                    b2f_stmt.execute(params![
-                                        backup_id,
-                                        full_backup.file_id,
-                                        new_file.uid,
-                                        new_file.gid,
-                                        new_file.mode,
-                                        is_deleted,
-                                    ])?;
+                                    b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
+                                        backup_id: *backup_id,
+                                        file_id: full_backup.file_id,
+                                        uid: new_file.uid,
+                                        gid: new_file.gid,
+                                        mode: new_file.mode,
+                                        is_deleted: false,
+                                    })?.to_slice().as_slice())?;
                                     count += 1;
                                 }
                                 // create a deletion record
                                 else {
-                                    let is_deleted = true;
-                                    b2f_stmt.execute(params![
-                                        backup_id,
-                                        full_backup.file_id,
-                                        full_backup.uid,
-                                        full_backup.gid,
-                                        full_backup.mode,
-                                        is_deleted,
-                                    ])?;
+                                    b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
+                                        backup_id: *backup_id,
+                                        file_id: full_backup.file_id,
+                                        uid: full_backup.uid,
+                                        gid: full_backup.gid,
+                                        mode: full_backup.mode,
+                                        is_deleted: true,
+                                    })?.to_slice().as_slice())?;
                                     count += 1;
                                 }
                             }
@@ -1027,31 +993,30 @@ impl Options {
                             let tape_record = ctx.tapes.get(&label).ok_or_else(|| eyre!("No tape record found for {label}"))?.clone();
                             let tx = conn.transaction()?;
                             {
-                                let mut file_stmt = tx.prepare(r#"insert into file (tape_id,path,mtime,size,symlink_target) values (?1,?2,?3,?4,?5) returning *"#)?;
-                                let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (?1,?2,?3,?4,?5,?6)"#)?;
+                                let mut file_stmt = tx.prepare(r#"insert into file (tape_id,path,mtime,size,symlink_target) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target) returning *"#)?;
+                                let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
                                 for queued_file in &ctx.queued_files {
                                     // write file and backup2file db records
-                                    let symlink_target = if let Some(t) = &queued_file.symlink_target 
-                                        {Some(stfu8::encode_u8_pretty(t.as_os_str().as_bytes()))}
-                                        else {None};
-                                    let mut rows = file_stmt.query(params![
-                                        &tape_record.id, 
-                                        stfu8::encode_u8_pretty(queued_file.path.as_os_str().as_bytes()),
-                                        &queued_file.mtime,
-                                        &queued_file.size,
-                                        &symlink_target,
-                                    ])?;
-                                    if let Some(row) = rows.next()? {
-                                        let file_id: i64 = row.get(0)?;
-                                        let is_deleted = false;
-                                        b2f_stmt.execute(params![
-                                            &backup.id,
-                                            file_id,
-                                            &queued_file.uid,
-                                            &queued_file.gid,
-                                            &queued_file.mode,
-                                            is_deleted,
-                                        ])?;
+                                    let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(File{
+                                        id: 0,
+                                        tape_id: tape_record.id,
+                                        path: queued_file.path.clone(),
+                                        mtime: queued_file.mtime,
+                                        size: queued_file.size,
+                                        filetype: queued_file.filetype,
+                                        symlink_target: queued_file.symlink_target.clone(),
+                                    }, &["tape_id","path","mtime","size","filetype","symlink_target"])?.to_slice().as_slice())?;
+                                    let mut rows_iter = serde_rusqlite::from_rows::<File>(rows);
+                                    if let Some(file) = rows_iter.next() {
+                                        let file = file?;
+                                        b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
+                                            backup_id: backup.id,
+                                            file_id: file.id,
+                                            uid: queued_file.uid,
+                                            gid: queued_file.gid,
+                                            mode: queued_file.mode,
+                                            is_deleted: false,
+                                        })?.to_slice().as_slice())?;
                                     }
                                 }
                             }
@@ -1290,22 +1255,10 @@ impl Options {
                             let tape = ctx.tape.as_ref().ok_or_else(|| eyre!("No tape record is set"))?;
                             let label = tape.label.as_ref().ok_or_else(|| eyre!("No label found for tape {tape}", tape=tape.index))?;
                             let tape_record = ctx.tapes.get(label).ok_or_else(|| eyre!("No tape record found for {label}"))?;
-                            let mut rows = stmt.query(params![backup_id, tape_record.id])?;
-                            while let Some(row) = rows.next()? {
-                                let path: String = row.get(1)?;
-                                let symlink_target: Option<String> = row.get(8)?;
-                                let filetype: u8 = row.get(7)?;
-                                let new_file = NewFile {
-                                    id: row.get(0)?,
-                                    path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&path)?)),
-                                    mtime: row.get(2)?,
-                                    size: row.get(3)?,
-                                    uid: row.get(4)?,
-                                    gid: row.get(5)?,
-                                    mode: row.get(6)?,
-                                    filetype: FileType::try_from(filetype)?,
-                                    symlink_target: if let Some(s) = &symlink_target {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(s)?)))} else {None},
-                                };
+                            let rows = stmt.query(params![backup_id, tape_record.id])?;
+                            let mut rows_iter = serde_rusqlite::from_rows::<NewFile>(rows);
+                            while let Some(new_file) = rows_iter.next() {
+                                let new_file = new_file?;
                                 let path = [
                                     &dest,
                                     &new_file.path,
@@ -1403,21 +1356,14 @@ impl Options {
         // get the tape db records
         let mut tapes = LinkedHashMap::<i64,Tape>::new();
         {
-            let sql = "select * from tape order by id";
-            debug!("Running query: {sql}");
-            let mut stmt = conn.prepare(sql)?;
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let id: i64 = row.get(0)?;
-                tapes.insert(id, Tape{
-                    id: id,
-                    label: row.get(1)?,
-                    is_full: row.get(2)?,
-                    date_added: row.get(3)?,
-                });
+            let mut stmt = conn.prepare("select * from tape")?;
+            let mut rows_iter = serde_rusqlite::from_rows::<Tape>(stmt.query([])?);
+            while let Some(tape) = rows_iter.next() {
+                let tape = tape?;
+                tapes.insert(tape.id, tape);
             }
         }
-        debug!("Found tapes db records: {tapes:#?}");
+        debug!("got tapes records: {tapes:#?}");
 
         // get the selected (or most recent if unspecified) backup record
         let mut backup = Option::<Backup>::None;
@@ -1435,7 +1381,7 @@ impl Options {
                 complete=if restore_cmd.complete {"and is_complete"} else {""});
             debug!("Running query: {sql}");
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = if restore_cmd.backup_id.is_some() || restore_cmd.backup_uuid.is_some() || restore_cmd.backup_date.is_some() {
+            let rows = if restore_cmd.backup_id.is_some() || restore_cmd.backup_uuid.is_some() || restore_cmd.backup_date.is_some() {
                 let backup_date = restore_cmd.backup_date.clone().map(|bd| 
                     bd.parse::<dateparser::DateTimeUtc>().ok().map(|d| 
                         d.0.timestamp())
@@ -1448,14 +1394,10 @@ impl Options {
             } else {
                 stmt.query(params![])?
             };
-            if let Some(row) = rows.next()? {
-                backup = Some(Backup {
-                    id: row.get(0)?,
-                    date_created: row.get(1)?,
-                    uuid: row.get(2)?,
-                    parent_backup_id: row.get(3)?,
-                    is_complete: row.get(4)?,
-                });
+            let mut rows_iter = serde_rusqlite::from_rows::<Backup>(rows);
+            if let Some(backup_record) = rows_iter.next() {
+                let backup_record = backup_record?;
+                backup = Some(backup_record);
             }
         }
 
@@ -1514,25 +1456,9 @@ impl Options {
             let mut stmt = conn.prepare(sql)?;
             let mut old_tape_id = Option::<i64>::None;
             let mut old_dir = Option::<(PathBuf, i64)>::None;
-            let mut rows = stmt.query([&backup.id])?;
-            while let Some(row) = rows.next()? {
-                let path: String = row.get(7)?;
-                let filetype: u8 = row.get(11)?;
-                let symlink_target: Option<String> = row.get(7)?;
-                let full_backup = FullBackup {
-                    backup_id: row.get(0)?,
-                    uid: row.get(1)?,
-                    gid: row.get(2)?,
-                    mode: row.get(3)?,
-                    is_deleted: row.get(4)?,
-                    file_id: row.get(5)?,
-                    tape_id: row.get(6)?,
-                    path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&path)?)),
-                    mtime: row.get(8)?,
-                    size: row.get(9)?,
-                    filetype: FileType::try_from(filetype)?,
-                    symlink_target: if let Some(s) = symlink_target {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&s)?)))} else {None},
-                };
+            let rows = stmt.query([&backup.id])?;
+            let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
+            while let Some(full_backup) = rows_iter.next() {
                 if ! restore_cmd.patterns.is_empty() {
                     let mut found_match = false;
                     for pattern in &restore_cmd.patterns {
@@ -1779,15 +1705,11 @@ impl Options {
                 stmt.query(params![])?
             };
             csv_writer.write_record(cols.as_slice())?;
-            while let Some(row) = rows.next()? {
-                let r: [String; 5] = [
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ];
-                csv_writer.write_record(r.as_slice())?;
+
+            let mut rows_iter = serde_rusqlite::from_rows::<Backup>(rows);
+            while let Some(backup) = rows_iter.next() {
+                let backup = backup?;
+                csv_writer.serialize(backup)?;
             }
         }
         Ok(())
@@ -1830,26 +1752,18 @@ impl Options {
         let mut tapes = LinkedHashMap::<i64,Tape>::new();
         {
             let mut stmt = conn.prepare("select * from tape")?;
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let id: i64 = row.get(0)?;
-                tapes.insert(id, Tape{
-                    id: id,
-                    label: row.get(1)?,
-                    is_full: row.get(2)?,
-                    date_added: row.get(3)?,
-                });
+            let mut rows_iter = serde_rusqlite::from_rows::<Tape>(stmt.query([])?);
+            while let Some(tape) = rows_iter.next() {
+                let tape = tape?;
+                tapes.insert(tape.id, tape);
             }
         }
-        debug!("got tapes db records: {tapes:#?}");
+        debug!("got tapes records: {tapes:#?}");
 
         let mut backup = Option::<Backup>::None;
         {
             let sql = format!(r#"
-            select t.label as tape_label,
-              f.path,
-              f.mtime,
-              f.gid,
+            select *
             from backup b
             {where}
             order by date_created desc
@@ -1858,7 +1772,7 @@ impl Options {
                 {r#"where (b.id=?1 or b.uuid=?2 or b.date_created <= ?3)"#} 
                 else {""});
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = if list_files_cmd.backup_id.is_some() || list_files_cmd.backup_uuid.is_some() || list_files_cmd.backup_date.is_some() {
+            let rows = if list_files_cmd.backup_id.is_some() || list_files_cmd.backup_uuid.is_some() || list_files_cmd.backup_date.is_some() {
                 let backup_date = list_files_cmd.backup_date.clone().map(|bd| 
                     bd.parse::<dateparser::DateTimeUtc>().ok().map(|d| 
                         d.0.timestamp())
@@ -1871,16 +1785,13 @@ impl Options {
             } else {
                 stmt.query(params![])?
             };
-            if let Some(row) = rows.next()? {
-                backup = Some(Backup {
-                    id: row.get(0)?,
-                    date_created: row.get(1)?,
-                    uuid: row.get(2)?,
-                    parent_backup_id: row.get(3)?,
-                    is_complete: row.get(4)?,
-                });
+            let mut rows_iter = serde_rusqlite::from_rows::<Backup>(rows);
+            if let Some(backup_record) = rows_iter.next() {
+                let backup_record = backup_record?;
+                backup = Some(backup_record);
             }
         }
+
         let cache = users::UsersCache::new();
         if let Some(backup) = backup {
             debug!("Using backup record: {backup:#?}");
@@ -1917,24 +1828,9 @@ impl Options {
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(sql)?;
             let mut rows = stmt.query([&backup.id])?;
-            while let Some(row) = rows.next()? {
-                let path: String = row.get(7)?;
-                let filetype: u8 = row.get(10)?;
-                let symlink_target: Option<String> = row.get(11)?;
-                let full_backup = FullBackup {
-                    backup_id: row.get(0)?,
-                    uid: row.get(1)?,
-                    gid: row.get(2)?,
-                    mode: row.get(3)?,
-                    is_deleted: row.get(4)?,
-                    file_id: row.get(5)?,
-                    tape_id: row.get(6)?,
-                    path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&path)?)),
-                    mtime: row.get(8)?,
-                    size: row.get(9)?,
-                    filetype: FileType::try_from(filetype)?,
-                    symlink_target: if let Some(s) = symlink_target {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&s)?)))} else {None},
-                };
+            let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
+            while let Some(full_backup) = rows_iter.next() {
+                let full_backup = full_backup?;
                 if ! list_files_cmd.patterns.is_empty() {
                     let mut found_match = false;
                     for pattern in &list_files_cmd.patterns {
