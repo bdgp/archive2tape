@@ -1179,10 +1179,10 @@ impl Options {
                     let file_path = PathBuf::from(file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
                     let file_path = file_path.strip_prefix("/").unwrap_or_else(|_| file_path.as_path());
 
-                    let dest_path = [
+                    let dest_path = PathBuf::from(stfu8::encode_u8_pretty([
                         &dest.as_path(), 
                         &file_path,
-                    ].iter().collect::<PathBuf>();
+                    ].iter().collect::<PathBuf>().as_os_str().as_bytes()));
                     // make sure dest path exists
                     trace!("Create parent directories: {}", dest_path.to_string_lossy());
                     if let Err(e) = std::fs::create_dir_all(&dest_path) {
@@ -1216,10 +1216,10 @@ impl Options {
                     match file.filetype {
                         FileType::Directory => {
                             trace!("is a directory");
-                            let destdir = [
+                            let destdir = PathBuf::from(stfu8::encode_u8_pretty([
                                 &dest_path,
                                 &PathBuf::from(file_name),
-                            ].iter().collect::<PathBuf>();
+                            ].iter().collect::<PathBuf>().as_os_str().as_bytes()));
                             trace!("destdir={destdir}", destdir=destdir.to_string_lossy());
 
                             info!("{path}/ -> {destdir}/", path=file.path.to_string_lossy(), destdir=destdir.to_string_lossy());
@@ -1243,10 +1243,10 @@ impl Options {
                         FileType::Symlink => {
                             trace!("is a symlink");
                             // create the symlink
-                            let dest_file = [
+                            let dest_file = PathBuf::from(stfu8::encode_u8_pretty([
                                 &dest_path, 
                                 &PathBuf::from(file_name),
-                            ].iter().collect::<PathBuf>();
+                            ].iter().collect::<PathBuf>().as_os_str().as_bytes()));
                             trace!("dest_file={dest_file}", dest_file=dest_file.to_string_lossy());
 
                             if let Some(target) = &file.symlink_target {
@@ -1296,16 +1296,16 @@ impl Options {
                             let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
                             trace!("tmp_file_name={tmp_file_name}", tmp_file_name=tmp_file_name.to_string_lossy());
 
-                            let tmp_file = [
+                            let tmp_file = PathBuf::from(stfu8::encode_u8_pretty([
                                 &dest_path, 
                                 &tmp_file_name,
-                            ].iter().collect::<PathBuf>();
+                            ].iter().collect::<PathBuf>().as_os_str().as_bytes()));
                             trace!("tmp_file={tmp_file}", tmp_file=tmp_file.to_string_lossy());
 
-                            let dest_file = [
+                            let dest_file = PathBuf::from(stfu8::encode_u8_pretty([
                                 &dest_path, 
                                 &PathBuf::from(file_name),
-                            ].iter().collect::<PathBuf>();
+                            ].iter().collect::<PathBuf>().as_os_str().as_bytes()));
                             trace!("dest_file={dest_file}", dest_file=dest_file.to_string_lossy());
 
                             info!("{path} -> {dest_file}", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy());
@@ -1433,10 +1433,10 @@ impl Options {
                         let new_file_path = PathBuf::from(new_file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
                         let new_file_path = new_file_path.strip_prefix("/").unwrap_or_else(|_| new_file_path.as_path());
 
-                        let path = [
+                        let path = PathBuf::from(stfu8::encode_u8_pretty([
                             &dest.as_path(),
                             &new_file_path,
-                        ].iter().collect::<PathBuf>();
+                        ].iter().collect::<PathBuf>().as_os_str().as_bytes()));
                         let mut file_exists = false;
                         if path.exists() {
                             match new_file.filetype {
@@ -1468,7 +1468,6 @@ impl Options {
                         if ! file_exists {
                             to_delete.push_back(new_file);
                         }
-
                     }
                     // remove db records for missing files
                     for new_file in &to_delete {
@@ -1680,10 +1679,10 @@ impl Options {
 
                 let full_backup_path = PathBuf::from(full_backup.path.parent().unwrap_or(PathBuf::from(".").as_path()));
                 let full_backup_path = full_backup_path.strip_prefix("/").unwrap_or_else(|_| full_backup_path.as_path());
-                let source = [
+                let source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
                     &source_path.as_path(),
                     &full_backup_path,
-                ].iter().collect::<PathBuf>();
+                ].iter().collect::<PathBuf>().to_string_lossy().to_string())?));
                 let dest = [
                     &restore_cmd.restore_path.as_path(),
                     &full_backup_path,
