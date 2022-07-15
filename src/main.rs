@@ -638,32 +638,40 @@ impl Options {
             filter(|t| t.is_full).
             map(|t| t.label.clone()).collect::<HashSet<_>>();
         debug!("Got full tapes from db: {full_tapes:#?}");
+        // get list of non-full tapes we know about
         let non_full_tapes = ts.iter().
             filter(|t| !t.is_full).
             map(|t| t.label.clone()).collect::<HashSet<_>>();
         debug!("Got non-full tapes from db: {non_full_tapes:#?}");
 
+        // get list of potentially usable tapes
         let mut tapes = ls.iter().
             filter(|se| 
-                se.storage_type == StorageType::Element && 
+                (se.storage_type == StorageType::Drive || se.storage_type == StorageType::Element) && 
                 se.status==StorageStatus::Full &&
                 if self.tapes.is_empty() {true} else {if let Some(label) = &se.label {self.tapes.contains(label)} else {true}}).
             collect::<Vec<_>>();
         tapes.sort_by_key(|t| 
             (!(if let Some(label) = &t.label {non_full_tapes.contains(label)} else {false}), 
             &t.storage_type,
-            &t.label));
+            &t.index));
         debug!("Got usable tapes: {tapes:#?}");
 
         // find a tape to use
         debug!("Find a tape to use");
         for tape in &tapes {
             debug!("Checking tape: {tape:#?}");
-            if tape.storage_type == StorageType::Element || tape.storage_type == StorageType::Drive {
+            if tape.storage_type == StorageType::Drive || tape.storage_type == StorageType::Element {
                 if let Some(label) = &tape.label {
                     // if the tape is not marked as full
                     if ! full_tapes.contains(label) && ! self.ignore_tape.is_match(label) {
                         if tape.storage_type != StorageType::Drive {
+                            // if ltfs filesystem is not mounted
+                            if self.is_mounted()? {
+                                debug!("Unmounting LTFS filesystem");
+                                // attempt to mount the tape
+                                self.unmount_tape()?;
+                            }
                             // load the tape into the drive
                             debug!("Loading usable tape: {tape:#?}");
                             self.load_tape(tape.index)?;
@@ -672,30 +680,35 @@ impl Options {
                         // if no db record exists for tape, attempt to format the tape
                         // if tape is already formatted, formatting will fail
                         if !non_full_tapes.contains(label) {
-                            debug!("Tape has no db record, try formatting it");
-                            debug!("Running mkltfs commmand");
-                            let output = cmd!(&self.mkltfs, "-d", &self.drive).unchecked().run()?;
-                            match output.status.code() {
-                                Some(16) => {
-                                    debug!("mkltfs returned exit code 16, already formatted");
-                                }, // already formatted
-                                Some(0) => {
-                                    debug!("mkltfs format succeeded");
-                                }, // format succeeded
-                                code => Err(eyre!("mkltfs command returned exit status {code:#?}"))?,
+                            if ! self.is_mounted()? {
+                                debug!("Tape has no db record, try formatting it");
+                                debug!("Running mkltfs commmand");
+                                let output = cmd!(&self.mkltfs, "-d", &self.drive).unchecked().run()?;
+                                match output.status.code() {
+                                    Some(16) => {
+                                        debug!("mkltfs returned exit code 16, already formatted");
+                                    }, // already formatted
+                                    Some(0) => {
+                                        debug!("mkltfs format succeeded");
+                                    }, // format succeeded
+                                    code => Err(eyre!("mkltfs command returned exit status {code:#?}"))?,
+                                }
                             }
                             // insert a db record for the tape
+                            debug!("insert tape database record");
                             self.insert_tape_record(&label)?;
                         }
 
                         // if ltfs filesystem is not mounted
                         if !self.is_mounted()? {
+                            debug!("mount the tape LTFS filesystem");
                             // attempt to mount the tape
                             self.mount_tape()?;
                         }
 
                         // check for available space
                         if self.is_tape_full()? {
+                            debug!("LTFS filesystem is full, set tape record as full, and try another tape");
                             self.set_tape_record_as_full(label)?;
                             continue;
                         }
@@ -1437,18 +1450,19 @@ impl Options {
                             };
                             // add file to the queued_files list
                             ctx.queued_files.push(file.clone());
-                            // wait db_write_wait seconds before writing db records
-                            let duration = start.elapsed();
-                            if duration.as_secs() >= backup_cmd.db_write_wait {
-                                if ! backup_cmd.dry_run {
-                                    if let Ok(save_queued_files) = save_queued_files.lock() {
-                                        save_queued_files()?;
-                                    }
-                                }
-                                start = Instant::now();
-                            }
                         }
                         next_file = ctx.to_copy.pop_front();
+                    }
+
+                    // wait db_write_wait seconds before writing db records
+                    let duration = start.elapsed();
+                    if duration.as_secs() >= backup_cmd.db_write_wait {
+                        if ! backup_cmd.dry_run {
+                            if let Ok(save_queued_files) = save_queued_files.lock() {
+                                save_queued_files()?;
+                            }
+                        }
+                        start = Instant::now();
                     }
                 }
                 // check if we need to set old_dir's mtime
@@ -2238,7 +2252,7 @@ fn main() -> Result<()> {
         Ok(path) => path,
         Err(e) => Err(eyre!("Could not find ltfs program: {mkltfs}: {e}", mkltfs=options.mkltfs.display()))?,
     };
-    options.mkltfs = match which(&options.umount) {
+    options.umount = match which(&options.umount) {
         Ok(path) => path,
         Err(e) => Err(eyre!("Could not find umount program: {umount}: {e}", umount=options.umount.display()))?,
     };
