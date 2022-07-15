@@ -187,20 +187,20 @@ struct Options {
 }
 
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 enum StorageType {
     Drive,
     Element,
     ImportExport,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 enum StorageStatus {
     Empty,
     Full,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct StorageElement {
     index: usize,
     label: Option<String>,
@@ -452,6 +452,36 @@ impl Options {
         debug!("elements.len: {}", elements.len());
         debug!("elements: {elements:#?}");
         Ok(elements)
+    }
+
+    fn init_pager(&self) -> Result<()> {
+        let pager_cmd = if let Ok(pspg) = which("pspg") {
+            Some(format!("{} --csv --csv-header on", pspg.to_string_lossy()))
+        } 
+        else if let Ok(less) = which("less") {
+            Some(less.to_string_lossy().to_string())
+        }
+        else {None};
+        debug!("Using pager: {pager_cmd:#?}");
+        let mut pager = if let Some(pager_cmd) = &pager_cmd {
+            Pager::with_pager(pager_cmd)
+        }
+        else {
+            Pager::new()
+        };
+        pager.setup();
+        Ok(())
+    }
+
+    fn loader_status_view(&self) -> Result<()> {
+        let ls = self.loader_status()?;
+        self.init_pager()?;
+
+        let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
+        for se in &ls {
+            csv_writer.serialize(se)?;
+        }
+        Ok(())
     }
 
     fn is_mounted(&self) -> Result<bool> {
@@ -1978,21 +2008,7 @@ impl Options {
             _ => Err(eyre!("Couldn't match subcommand!"))?,
         };
 
-        let pager_cmd = if let Ok(pspg) = which("pspg") {
-            Some(format!("{} --csv --csv-header on", pspg.to_string_lossy()))
-        } 
-        else if let Ok(less) = which("less") {
-            Some(less.to_string_lossy().to_string())
-        }
-        else {None};
-        debug!("Using pager: {pager_cmd:#?}");
-        let mut pager = if let Some(pager_cmd) = &pager_cmd {
-            Pager::with_pager(pager_cmd)
-        }
-        else {
-            Pager::new()
-        };
-        pager.setup();
+        self.init_pager()?;
 
         let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
 
@@ -2043,21 +2059,7 @@ impl Options {
             _ => Err(eyre!("Couldn't match subcommand!"))?,
         };
 
-        let pager_cmd = if let Ok(pspg) = which("pspg") {
-            Some(format!("{} --csv --csv-header on", pspg.to_string_lossy()))
-        } 
-        else if let Ok(less) = which("less") {
-            Some(less.to_string_lossy().to_string())
-        }
-        else {None};
-        debug!("Using pager: {pager_cmd:#?}");
-        let mut pager = if let Some(pager_cmd) = &pager_cmd {
-            Pager::with_pager(pager_cmd)
-        }
-        else {
-            Pager::new()
-        };
-        pager.setup();
+        self.init_pager()?;
 
         let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
 
@@ -2304,22 +2306,14 @@ fn main() -> Result<()> {
     }
 
     match &options.cmd {
-        Some(Command::Backup(_)) => {
-            options.backup_files()?;
-        },
-        Some(Command::Restore(_)) => {
-            options.restore_files()?;
-        },
-        Some(Command::ListBackups(_)) => {
-            options.list_backups()?;
-        },
-        Some(Command::ListFiles(_)) => {
-            options.list_files()?;
-        },
+        Some(Command::Backup(_)) => options.backup_files()?,
+        Some(Command::Restore(_)) => options.restore_files()?,
+        Some(Command::ListBackups(_)) => options.list_backups()?,
+        Some(Command::ListFiles(_)) => options.list_files()?,
         Some(Command::FormatLTFS) => info!("{:#?}", options.format_ltfs()),
         Some(Command::IsMounted) => info!("{:#?}", options.is_mounted()),
         Some(Command::IsTapeFull) => info!("{:#?}", options.is_tape_full()),
-        Some(Command::LoaderStatus) => info!("{:#?}", options.loader_status()?),
+        Some(Command::LoaderStatus) => options.loader_status_view()?,
         Some(Command::LoadTape(load_tape_cmd)) => info!("{:#?}", options.load_tape(load_tape_cmd.slot)?),
         Some(Command::MountTape) => info!("{:#?}", options.mount_tape()?),
         Some(Command::ReadyStorage) => info!("{:#?}", options.ready_storage()?),
