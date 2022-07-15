@@ -120,19 +120,38 @@ struct ListFilesCmd {
 }
 
 #[derive(StructOpt, Debug)]
+struct LoadTapeCmd {
+    #[structopt(help = "Load a tape with a given slot number", name="SLOT_NUMBER")]
+    slot: usize,
+}
+
+#[derive(StructOpt, Debug)]
 enum Command {
     Backup(BackupCmd),
     Restore(RestoreCmd),
     ListBackups(ListBackupsCmd),
     ListFiles(ListFilesCmd),
+    FormatLTFS,
+    IsMounted,
+    IsTapeFull,
+    LoaderStatus,
+    LoadTape(LoadTapeCmd),
+    MountTape,
+    ReadyStorage,
+    TapeStatus,
+    UnmountTape,
+    WaitForDrive,
+    WaitForLTFSProcessToTerminate,
 }
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::UnifiedHelpMessage])]
 struct Options {
     //#[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/tape/by-id/scsi-35000e111c89b5001-nst")]
-    #[structopt(long = "drive", help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/sg2")]
+    #[structopt(long = "drive", help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/tape/by-path/pci-0000:b3:00.0-sas-0x5000e111c89b5002-lun-0-nst")]
     drive: PathBuf,
+    #[structopt(long = "ltfs-drive", help = "Path to tape drive device to use for ltfs", name="LTFS_DRIVE_DEVICE", default_value="/dev/sg2")]
+    ltfs_drive: PathBuf,
     #[structopt(long = "loader", help = "Path to loader device", name="LOADER_DEVICE", default_value="/dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0")]
     loader: PathBuf,
     #[structopt(long = "mtx", help = "Path to mtx command (from mtx package)", name="MTX_PATH", default_value="mtx")]
@@ -442,7 +461,7 @@ impl Options {
                 return Ok(true);
             }
         }
-        Err(eyre!("No disk matching {ltfs_path} was found!", ltfs_path=self.ltfs_path.display()))
+        Ok(false)
     }
 
     fn is_tape_full(&self) -> Result<bool> {
@@ -518,13 +537,20 @@ impl Options {
     fn wait_for_drive(&self) -> Result<()> {
         debug!("Running wait_for_drive");
         let mut drive_is_ready = false;
+        'WAIT_FOR_DRIVE:
         for _ in 0..300 {
             debug!("Running mt status command");
-            let drivestatus = cmd!("mt","-f", &self.drive, "status").run()?;
-            if regex_is_match!(r#"ONLINE"#B, &drivestatus.stdout) {
-                debug!("Drive is ready");
-                drive_is_ready = true;
-                break
+            let mt_cmd = cmd!("mt","-f", &self.drive, "status");
+            let reader = mt_cmd.reader()?;
+            let reader = BufReader::new(reader);
+
+            for line in reader.lines() {
+                let line = line?;
+                if regex_is_match!(r#"ONLINE"#, &line) {
+                    debug!("Drive is ready");
+                    drive_is_ready = true;
+                    break 'WAIT_FOR_DRIVE;
+                }
             }
             debug!("Waiting 1 second...");
             std::thread::sleep(std::time::Duration::new(1, 0));
@@ -603,13 +629,28 @@ impl Options {
         debug!("Running mount_tape");
         if ! self.is_mounted()? {
             debug!("Running ltfs commmand");
-            cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.drive.to_string_lossy()), &self.ltfs_path).run()?;
+            cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.ltfs_drive.to_string_lossy()), &self.ltfs_path).run()?;
             if ! self.is_mounted()? {
                 Err(eyre!("path {ltfs_path} was not mounted", ltfs_path=self.ltfs_path.display()))?;
             }
         }
         else {
             debug!("LTFS is already mounted");
+        }
+        Ok(())
+    }
+
+    fn format_ltfs(&self) -> Result<()> {
+        debug!("Running mkltfs commmand");
+        let output = cmd!(&self.mkltfs, "-d", &self.ltfs_drive).unchecked().run()?;
+        match output.status.code() {
+            Some(16) => {
+                debug!("mkltfs returned exit code 16, already formatted");
+            }, // already formatted
+            Some(0) => {
+                debug!("mkltfs format succeeded");
+            }, // format succeeded
+            code => Err(eyre!("mkltfs command returned exit status {code:#?}"))?,
         }
         Ok(())
     }
@@ -669,17 +710,7 @@ impl Options {
                         if !non_full_tapes.contains(label) {
                             if ! self.is_mounted()? {
                                 debug!("Tape has no db record, try formatting it");
-                                debug!("Running mkltfs commmand");
-                                let output = cmd!(&self.mkltfs, "-d", &self.drive).unchecked().run()?;
-                                match output.status.code() {
-                                    Some(16) => {
-                                        debug!("mkltfs returned exit code 16, already formatted");
-                                    }, // already formatted
-                                    Some(0) => {
-                                        debug!("mkltfs format succeeded");
-                                    }, // format succeeded
-                                    code => Err(eyre!("mkltfs command returned exit status {code:#?}"))?,
-                                }
+                                self.format_ltfs()?;
                             }
                             // insert a db record for the tape
                             debug!("insert tape database record");
@@ -2235,7 +2266,7 @@ fn main() -> Result<()> {
         Err(eyre!("Could not find LTFS mount directory:: {ltfs_path}", ltfs_path=options.ltfs_path.display()))?
     }
 
-    match options.cmd {
+    match &options.cmd {
         Some(Command::Backup(_)) => {
             options.backup_files()?;
         },
@@ -2248,6 +2279,17 @@ fn main() -> Result<()> {
         Some(Command::ListFiles(_)) => {
             options.list_files()?;
         },
+        Some(Command::FormatLTFS) => info!("{:#?}", options.format_ltfs()),
+        Some(Command::IsMounted) => info!("{:#?}", options.is_mounted()),
+        Some(Command::IsTapeFull) => info!("{:#?}", options.is_tape_full()),
+        Some(Command::LoaderStatus) => info!("{:#?}", options.loader_status()?),
+        Some(Command::LoadTape(load_tape_cmd)) => info!("{:#?}", options.load_tape(load_tape_cmd.slot)?),
+        Some(Command::MountTape) => info!("{:#?}", options.mount_tape()?),
+        Some(Command::ReadyStorage) => info!("{:#?}", options.ready_storage()?),
+        Some(Command::TapeStatus) => info!("{:#?}", options.tape_status()),
+        Some(Command::UnmountTape) => info!("{:#?}", options.unmount_tape()?),
+        Some(Command::WaitForDrive) => info!("{:#?}", options.wait_for_drive()),
+        Some(Command::WaitForLTFSProcessToTerminate) => info!("{:#?}", options.wait_for_ltfs_process_to_terminate()),
         _ => {
             eprintln!("Must specify one of: backup, restore, listbackups, listfiles");
             std::process::exit(1);
