@@ -1502,13 +1502,13 @@ impl Options {
                                     trace!("is a file");
                                     if !path.is_symlink() && path.is_file() {
                                         trace!("found file {path}", path=path.to_string_lossy());
-                                        if let Ok(md) = std::fs::symlink_metadata(&dest) {
+                                        if let Ok(md) = std::fs::metadata(&path) {
                                             if md.size() == new_file.size && md.mtime() == new_file.mtime {
                                                 trace!("sizes and mtimes match, files are the same");
                                                 file_exists = true;
                                             }
                                             else {
-                                                trace!("sizes and mtimes do NOT match, files are different");
+                                                trace!("sizes and mtimes do NOT match, files are different: tape_size={}, db_size={}, tape_mtime={}, db_mtime={}", md.size(), new_file.size, md.mtime(), new_file.mtime);
                                             }
                                         }
                                     }
@@ -1534,13 +1534,13 @@ impl Options {
                                         }
                                     } 
                                     else {
-                                        Err(eyre!("Symlink {new_file:#?} is missing symlink_target!"))?
+                                        Err(eyre!("Symlink {path} is missing symlink_target!", path=path.to_string_lossy()))?
                                     }
                                 },
                             };
                         }
                         if ! file_exists {
-                            trace!("File {new_file:#?} does not exist, queueing for deletion");
+                            trace!("File {path} does not exist, queueing for deletion", path=path.to_string_lossy());
                             to_delete.push_back(new_file);
                         }
                     }
@@ -1797,7 +1797,7 @@ impl Options {
                         trace!("is a directory");
                         info!("{source}/ -> {dest}/", source=source.to_string_lossy(), dest=dest.to_string_lossy());
                         let mut mtime = full_backup.mtime;
-                        let md = std::fs::symlink_metadata(&dest).ok(); 
+                        let md = std::fs::metadata(&dest).ok(); 
                         if ! restore_cmd.dry_run {
                             trace!("mkdir {} with mode {}", dest.to_string_lossy(), full_backup.mode);
                             match nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode)) {
@@ -1855,7 +1855,7 @@ impl Options {
 
                             // if mtime and size is the same, skip copying the file
                             trace!("check if file {} is already up to date", dest.to_string_lossy());
-                            let attr = std::fs::symlink_metadata(&dest)?;
+                            let attr = std::fs::metadata(&dest)?;
                             if dest.is_file() && attr.mtime() == full_backup.mtime && attr.size() == full_backup.size {
                                 trace!("file {} is already up to date", dest.to_string_lossy());
                                 if ! restore_cmd.dry_run {
