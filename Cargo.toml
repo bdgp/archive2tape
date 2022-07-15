@@ -35,6 +35,7 @@ serde = "*"
 serde_rusqlite = "*"
 serde_derive = "*"
 shell-escape = "*"
+pager = "*"
 
 [dependencies.uuid]
 version = "*"

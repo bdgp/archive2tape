@@ -36,6 +36,7 @@ use users::{Users, Groups};
 use log::{info, debug, error, warn, trace};
 use flexi_logger::Logger;
 use serde_derive::{Deserialize, Serialize};
+use pager::Pager;
 
 // /dev/sg0 lto5 drive
 // /dev/sg1 lto5 loader
@@ -127,7 +128,7 @@ enum Command {
 }
 
 #[derive(StructOpt, Debug)]
-#[structopt(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::ArgRequiredElseHelp, clap::AppSettings::UnifiedHelpMessage])]
+#[structopt(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::UnifiedHelpMessage])]
 struct Options {
     //#[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/tape/by-id/scsi-35000e111c89b5001-nst")]
     #[structopt(long = "drive", help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/sg2")]
@@ -1909,27 +1910,23 @@ impl Options {
             _ => Err(eyre!("Couldn't match subcommand!"))?,
         };
 
-        let pager = std::env::var("PAGER").ok().
-            map(|p| PathBuf::from(p)).
-            or_else(|| which("pspg").ok()).
-            or_else(|| which("less").ok());
-        debug!("Using pager: {pager:#?}");
-        let mut process = if let Some(pager) = pager {
-            Some(std::process::Command::new(pager).
-                stdin(std::process::Stdio::piped()).
-                spawn()?)
-        } else { None };
-        let writer: Box<dyn std::io::Write> = if let Some(process) = &mut process {
-            if let Some(stdin) = &mut process.stdin {
-                Box::new(stdin)
-            }
-            else {
-                Err(eyre!("Could not open process stdin!"))?
-            }
-        } else {
-            Box::new(std::io::stdout())
+        let pager_cmd = if let Ok(pspg) = which("pspg") {
+            Some(format!("{} --csv --csv-header on", pspg.to_string_lossy()))
+        } 
+        else if let Ok(less) = which("less") {
+            Some(less.to_string_lossy().to_string())
+        }
+        else {None};
+        debug!("Using pager: {pager_cmd:#?}");
+        let mut pager = if let Some(pager_cmd) = &pager_cmd {
+            Pager::with_pager(pager_cmd)
+        }
+        else {
+            Pager::new()
         };
-        let mut csv_writer = csv::Writer::from_writer(writer);
+        pager.setup();
+
+        let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
 
         self.init_db()?;
         debug!("Connecting to database {db}", db=self.db.to_string_lossy());
@@ -1948,7 +1945,6 @@ impl Options {
                 complete=if list_backups_cmd.complete {"and is_complete"} else {""});
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(&sql)?;
-            let cols = stmt.column_names().iter().map(|c| c.to_string()).collect::<Vec<_>>();
             let rows = if list_backups_cmd.backup_id.is_some() || list_backups_cmd.backup_uuid.is_some() || list_backups_cmd.backup_date.is_some() {
                 let backup_date = list_backups_cmd.backup_date.clone().map(|bd| 
                     bd.parse::<dateparser::DateTimeUtc>().ok().map(|d| 
@@ -1962,7 +1958,6 @@ impl Options {
             } else {
                 stmt.query(params![])?
             };
-            csv_writer.write_record(cols.as_slice())?;
 
             let mut rows_iter = serde_rusqlite::from_rows::<Backup>(rows);
             while let Some(backup) = rows_iter.next() {
@@ -1980,27 +1975,23 @@ impl Options {
             _ => Err(eyre!("Couldn't match subcommand!"))?,
         };
 
-        let pager = std::env::var("PAGER").ok().
-            map(|p| PathBuf::from(p)).
-            or_else(|| which("pspg").ok()).
-            or_else(|| which("less").ok());
-        debug!("Using pager: {pager:#?}");
-        let mut process = if let Some(pager) = pager {
-            Some(std::process::Command::new(pager).
-                stdin(std::process::Stdio::piped()).
-                spawn()?)
-        } else { None };
-        let writer: Box<dyn std::io::Write> = if let Some(process) = &mut process {
-            if let Some(stdin) = &mut process.stdin {
-                Box::new(stdin)
-            }
-            else {
-                Err(eyre!("Could not open process stdin!"))?
-            }
-        } else {
-            Box::new(std::io::stdout())
+        let pager_cmd = if let Ok(pspg) = which("pspg") {
+            Some(format!("{} --csv --csv-header on", pspg.to_string_lossy()))
+        } 
+        else if let Ok(less) = which("less") {
+            Some(less.to_string_lossy().to_string())
+        }
+        else {None};
+        debug!("Using pager: {pager_cmd:#?}");
+        let mut pager = if let Some(pager_cmd) = &pager_cmd {
+            Pager::with_pager(pager_cmd)
+        }
+        else {
+            Pager::new()
         };
-        let mut csv_writer = csv::Writer::from_writer(writer);
+        pager.setup();
+
+        let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
 
         self.init_db()?;
         debug!("Connecting to database {db}", db=self.db.to_string_lossy());
@@ -2087,6 +2078,7 @@ impl Options {
             let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query([&backup.id])?;
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
+            csv_writer.write_record(&["mode","owner","group","size","mtime","tape_label","path","symlink_target"])?;
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
                 if ! list_files_cmd.patterns.is_empty() {
