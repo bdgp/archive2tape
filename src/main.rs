@@ -1174,16 +1174,17 @@ impl Options {
                 }
             }
             let mut tape_full = false;
-            let mut old_dir = Option::<(PathBuf, i64)>::None;
+            let mut old_dir = Vec::<(PathBuf, i64)>::new();
+            'TO_COPY:
             while let Some(file) = to_copy.pop_front() {
                 trace!("Handling file {file:#?}");
                 if let Some(file_name) = file.path.file_name() {
                     let file_path = PathBuf::from(file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
-                    let file_path = file_path.strip_prefix("/").unwrap_or_else(|_| file_path.as_path());
+                    let file_path_stripped = file_path.strip_prefix("/").unwrap_or_else(|_| file_path.as_path());
 
                     let dest_path = PathBuf::from(stfu8::encode_u8_pretty([
                         &dest.as_path(), 
-                        &file_path,
+                        &file_path_stripped,
                     ].iter().collect::<PathBuf>().as_os_str().as_bytes()));
                     // make sure dest path exists
                     trace!("Create parent directories: {}", dest_path.to_string_lossy());
@@ -1198,18 +1199,27 @@ impl Options {
                     }
                     // check if we need to set old_dir's mtime
                     if ! backup_cmd.dry_run {
-                        if let Some((old_dir, mtime)) = &old_dir {
-                            if dest_path != *old_dir {
-                                trace!("old_dir changed from {old_dir} to {dest_path}, setting mtime on old_dir", old_dir=old_dir.to_string_lossy(), dest_path=dest_path.to_string_lossy());
-                                let mtime = FileTime::from_unix_time(*mtime, 0);
-                                if let Err(e) = filetime::set_file_times(&old_dir, mtime.clone(), mtime.clone()) {
-                                    if self.is_tape_full()? {
-                                        tape_full = true;
+                        while ! old_dir.is_empty() {
+                            if let Some((last_old_dir, mtime)) = old_dir.last() {
+                                match file_path.strip_prefix(last_old_dir) {
+                                    Ok(_) => { 
+                                        // old_dir is still a parent of the current file's path
                                         break;
-                                    }
-                                    else {
-                                        Err(e)?
-                                    }
+                                    },
+                                    Err(_) => {
+                                        trace!("old_dir changed from {old_dir} to {dest_path}, setting mtime on old_dir", old_dir=last_old_dir.to_string_lossy(), dest_path=dest_path.to_string_lossy());
+                                        let mtime = FileTime::from_unix_time(*mtime, 0);
+                                        if let Err(e) = filetime::set_file_times(&last_old_dir, mtime.clone(), mtime.clone()) {
+                                            if self.is_tape_full()? {
+                                                tape_full = true;
+                                                break 'TO_COPY;
+                                            }
+                                            else {
+                                                Err(e)?
+                                            }
+                                        }
+                                        old_dir.pop();
+                                    },
                                 }
                             }
                         }
@@ -1239,8 +1249,8 @@ impl Options {
                                 }
                             }
                             // set old_dir so we can set the mtime later
-                            old_dir = Some((destdir.clone(), file.mtime));
-                            trace!("set old_dir to {old_dir:#?}");
+                            old_dir.push((destdir.clone(), file.mtime));
+                            trace!("push old_dir: {old_dir:#?}");
                         },
                         FileType::Symlink => {
                             trace!("is a symlink");
@@ -1387,9 +1397,9 @@ impl Options {
             }
             // check if we need to set old_dir's mtime
             if ! backup_cmd.dry_run {
-                if let Some(old_dir) = old_dir {
-                    let mtime = FileTime::from_unix_time(old_dir.1, 0);
-                    if let Err(e) = filetime::set_file_times(&old_dir.0, mtime.clone(), mtime.clone()) {
+                while let Some((old_dir, mtime)) = old_dir.pop() {
+                    let mtime = FileTime::from_unix_time(mtime, 0);
+                    if let Err(e) = filetime::set_file_times(&old_dir, mtime.clone(), mtime.clone()) {
                         if self.is_tape_full()? {
                             tape_full = true;
                         }
@@ -1616,7 +1626,7 @@ impl Options {
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(sql)?;
             let mut old_tape_id = Option::<i64>::None;
-            let mut old_dir = Option::<(PathBuf, i64)>::None;
+            let mut old_dir = Vec::<(PathBuf, i64)>::new();
             let rows = stmt.query([&backup.id])?;
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
             while let Some(full_backup) = rows_iter.next() {
@@ -1694,12 +1704,19 @@ impl Options {
                 if let Some(parent) = dest.parent() {
                     // set the mtime of the previous directory if it's done
                     // being written
-                    if let Some((od, mtime)) = &old_dir {
-                        if od != parent {
-                            trace!("set mtime of old_dir {od} to {mtime}", od=od.to_string_lossy());
-                            let filetime = FileTime::from_unix_time(*mtime, 0);
-                            filetime::set_file_times(od, filetime.clone(), filetime.clone())?;
-                            old_dir = None;
+                    while ! old_dir.is_empty() {
+                        if let Some((od, mtime)) = old_dir.last() {
+                            match parent.strip_prefix(&od) {
+                                Ok(_) => {
+                                    break;
+                                },
+                                Err(_) => {
+                                    trace!("set mtime of old_dir {od} to {mtime}", od=od.to_string_lossy());
+                                    let filetime = FileTime::from_unix_time(*mtime, 0);
+                                    filetime::set_file_times(od, filetime.clone(), filetime.clone())?;
+                                    old_dir.pop();
+                                },
+                            }
                         }
                     }
                     trace!("create parent directories for {}", parent.to_string_lossy());
@@ -1726,7 +1743,7 @@ impl Options {
                                 mtime = std::cmp::max(mtime, current_mtime.unix_seconds());
                             }
                         }
-                        old_dir = Some((dest, mtime));
+                        old_dir.push((dest, mtime));
                     },
                     FileType::Symlink => {
                         trace!("is a symlink");
@@ -1871,8 +1888,8 @@ impl Options {
                 };
             }
             // set the mtime for the previous directory
-            if let Some((old_dir, mtime)) = &old_dir {
-                let filetime = FileTime::from_unix_time(*mtime, 0);
+            while let Some((old_dir, mtime)) = old_dir.pop() {
+                let filetime = FileTime::from_unix_time(mtime, 0);
                 if ! restore_cmd.dry_run {
                     trace!("set mtime for old_dir {} to {}", old_dir.to_string_lossy(), mtime);
                     filetime::set_file_times(old_dir, filetime.clone(), filetime.clone())?;
