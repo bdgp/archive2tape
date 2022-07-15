@@ -142,8 +142,8 @@ struct Options {
     ltfs: PathBuf,
     #[structopt(long = "mkltfs", help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="/usr/local/bin/mkltfs")]
     mkltfs: PathBuf,
-    #[structopt(long = "umount", help = "Path to umount command", name="UMOUNT_PATH", default_value="umount")]
-    umount: PathBuf,
+    #[structopt(long = "fusermount", help = "Path to fusermount command", name="FUSERMOUNT_PATH", default_value="fusermount")]
+    fusermount: PathBuf,
     #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="DB_PATH")]
     db: PathBuf,
     #[structopt(long = "tapes-db", help = "Path to SQLite tapes metadata database", name="TAPES_DB_PATH")]
@@ -567,8 +567,8 @@ impl Options {
     fn unmount_tape(&self) -> Result<()> {
         debug!("Running unmount_tape");
         if self.is_mounted()? {
-            debug!("Running umount command");
-            cmd!(&self.umount, &self.ltfs_path).run()?;
+            debug!("Running fusermount command");
+            cmd!(&self.fusermount, "-u", &self.ltfs_path).run()?;
             self.wait_for_ltfs_process_to_terminate()?;
         }
         Ok(())
@@ -1783,10 +1783,18 @@ impl Options {
                                         if let Some(tape) = tapes.get(&full_backup.tape_id) {
                                             let ls = self.loader_status()?;
                                             if let Some(se) = ls.iter().filter(|se| if let Some(label) = &se.label {*label==tape.label} else {false}).next() {
-                                                debug!("Loading tape {label}", label=&tape.label);
-                                                self.unmount_tape()?;
-                                                self.load_tape(se.index)?;
-                                                self.mount_tape()?;
+                                                if se.storage_type == StorageType::Drive {
+                                                    debug!("Tape {label} is already loaded", label=&tape.label);
+                                                    if ! self.is_mounted()? {
+                                                        self.mount_tape()?;
+                                                    }
+                                                }
+                                                else {
+                                                    debug!("Loading tape {label}", label=&tape.label);
+                                                    self.unmount_tape()?;
+                                                    self.load_tape(se.index)?;
+                                                    self.mount_tape()?;
+                                                }
                                             }
                                             else {
                                                 Err(eyre!("Could not find tape with label {label} in loader!", label=tape.label))?
@@ -2143,11 +2151,11 @@ fn main() -> Result<()> {
     };
     options.mkltfs = match which(&options.mkltfs) {
         Ok(path) => path,
-        Err(e) => Err(eyre!("Could not find ltfs program: {mkltfs}: {e}", mkltfs=options.mkltfs.display()))?,
+        Err(e) => Err(eyre!("Could not find mkltfs program: {mkltfs}: {e}", mkltfs=options.mkltfs.display()))?,
     };
-    options.umount = match which(&options.umount) {
+    options.fusermount = match which(&options.fusermount) {
         Ok(path) => path,
-        Err(e) => Err(eyre!("Could not find umount program: {umount}: {e}", umount=options.umount.display()))?,
+        Err(e) => Err(eyre!("Could not find fusermount program: {fusermount}: {e}", fusermount=options.fusermount.display()))?,
     };
 
     if ! options.drive.exists() {
