@@ -2126,7 +2126,7 @@ fn main() -> Result<()> {
     let mut options = Options::from_args();
 
     let logspec = if options.trace {"TRACE"} else if options.verbose {"DEBUG"} else {"INFO"};
-    Logger::try_with_env_or_str(logspec)?.format(flexi_logger::detailed_format).start()?;
+    Logger::try_with_env_or_str(logspec)?.format(flexi_logger::colored_detailed_format).start()?;
     debug!("Parsed options: {options:#?}");
 
     options.mtx = match which(&options.mtx) {
