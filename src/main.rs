@@ -1487,7 +1487,7 @@ impl Options {
         // set the backup complete flag in the db
         if ! backup_cmd.dry_run {
             if let Some(backup) = &backup {
-                let sql = r#"update backup set is_complete=true where backup_id=?1"#;
+                let sql = r#"update backup set is_complete=true where id=?1"#;
                 debug!("Running sql update:\n{sql}\n");
                 conn.execute(sql, params![backup.id])?;
             }
