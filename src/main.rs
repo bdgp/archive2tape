@@ -4,8 +4,6 @@ use std::path::PathBuf;
 use std::io::{BufRead, BufReader};
 use std::collections::{HashSet, LinkedList};
 use std::os::unix::fs::PermissionsExt;
-use std::sync::{Mutex, Arc};
-use std::time::Instant;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use num_enum::{TryFromPrimitive, IntoPrimitive};
@@ -58,8 +56,6 @@ struct BackupCmd {
     patterns: Vec<Pattern>,
     #[structopt(long = "dry-run", help = "Do not actually backup any files, just show what files would be backed up")]
     dry_run: bool,
-    #[structopt(long = "db-write-wait", help = "Time in seconds to wait before writing db records during backup", default_value="60")]
-    db_write_wait: u64,
 }
 
 #[derive(StructOpt, Debug)]
@@ -324,15 +320,6 @@ struct FullBackup {
 struct BackupDiff {
     new_file: Option<NewFile>,
     full_backup: Option<FullBackup>,
-}
-
-#[derive(Debug)]
-struct BackupContext {
-    backup: Option<Backup>,
-    tape: Option<StorageElement>,
-    tapes: LinkedHashMap<String,Tape>,
-    queued_files: Vec<NewFile>,
-    to_copy: LinkedList<NewFile>,
 }
 
 macro_rules! cmd {
@@ -789,7 +776,7 @@ impl Options {
         // initialize the backup set's sqlite database
         self.init_db()?;
         debug!("Connecting to db {db}", db=self.db.display());
-        let conn = Connection::open(&self.db)?;
+        let mut conn = Connection::open(&self.db)?;
 
         // get the tape db records
         let mut tapes = LinkedHashMap::<String,Tape>::new();
@@ -832,334 +819,314 @@ impl Options {
         }
         debug!("Created backup record: {backup:#?}");
 
-        let ctx = Arc::new(Mutex::new(BackupContext {
-            backup: backup,
-            tape: Option::<StorageElement>::None,
-            tapes: tapes,
-            queued_files: Vec::<NewFile>::new(),
-            to_copy: LinkedList::<NewFile>::new(),
-        }));
-        let conn = Arc::new(Mutex::new(conn));
+        let mut to_copy = LinkedList::<NewFile>::new();
 
         // compute the backup diffs
         debug!("Computing backup diffs");
         let mut backup_diffs = Vec::<BackupDiff>::new();
-        if let (Ok(mut conn), Ok(mut ctx)) = (conn.lock(), ctx.lock()) {
-            let mut to_copy = Vec::<NewFile>::new();
+        {
+            let tx = conn.transaction()?;
+            let sql =r#"
+                    drop table if exists new_file;
+                    create table new_file (
+                        id integer primary key autoincrement not null,
+                        path text unique not null,
+                        mtime integer not null,
+                        size integer not null,
+                        uid integer not null,
+                        gid integer not null,
+                        mode integer not null,
+                        filetype integer not null,
+                        symlink_target text
+                    );
+            "#;
+            debug!("Running sql query:\n{sql}\n");
+            tx.execute_batch(sql)?;
             {
-                let tx = conn.transaction()?;
-                let sql =r#"
-                        drop table if exists new_file;
-                        create table new_file (
-                            id integer primary key autoincrement not null,
-                            path text unique not null,
-                            mtime integer not null,
-                            size integer not null,
-                            uid integer not null,
-                            gid integer not null,
-                            mode integer not null,
-                            filetype integer not null,
-                            symlink_target text
-                        );
-                "#;
-                debug!("Running sql query:\n{sql}\n");
-                tx.execute_batch(sql)?;
-                {
-                    info!("Scanning for files to backup...");
-                    debug!("Inserting new_file records");
-                    let sql = "insert into new_file (path,mtime,size,uid,gid,mode,filetype,symlink_target) values (:path,:mtime,:size,:uid,:gid,:mode,:filetype,:symlink_target) on conflict(path) do nothing";
-                    let mut stmt = tx.prepare(sql)?;
-                    let mut count = 0;
-                    // use the glob patterns to produce a list of files
-                    for g in &backup_cmd.patterns {
-                        for entry in glob::glob(g.as_str())? {
-                            match &entry {
-                                Ok(entry) => {
-                                    for direntry in WalkDir::new(&entry) {
-                                        match &direntry {
-                                            Ok(entry) => {
-                                                let path = entry.path();
-                                                // ignore any entries that are not one of: directory, file, symlink
-                                                if !path.is_dir() && !path.is_file() && !path.is_symlink() {
+                info!("Scanning for files to backup...");
+                debug!("Inserting new_file records");
+                let sql = "insert into new_file (path,mtime,size,uid,gid,mode,filetype,symlink_target) values (:path,:mtime,:size,:uid,:gid,:mode,:filetype,:symlink_target) on conflict(path) do nothing";
+                let mut stmt = tx.prepare(sql)?;
+                let mut count = 0;
+                // use the glob patterns to produce a list of files
+                for g in &backup_cmd.patterns {
+                    for entry in glob::glob(g.as_str())? {
+                        match &entry {
+                            Ok(entry) => {
+                                for direntry in WalkDir::new(&entry) {
+                                    match &direntry {
+                                        Ok(entry) => {
+                                            let path = entry.path();
+                                            // ignore any entries that are not one of: directory, file, symlink
+                                            if !path.is_dir() && !path.is_file() && !path.is_symlink() {
+                                                continue;
+                                            }
+                                            // check include filters
+                                            if !backup_cmd.include_regex.is_empty() {
+                                                let mut to_include = false;
+                                                for i in &backup_cmd.include_regex {
+                                                    if i.is_match(path.as_os_str().as_bytes()) {
+                                                        to_include = true;
+                                                        break;
+                                                    }
+                                                }
+                                                if !to_include {
                                                     continue;
                                                 }
-                                                // check include filters
-                                                if !backup_cmd.include_regex.is_empty() {
-                                                    let mut to_include = false;
-                                                    for i in &backup_cmd.include_regex {
-                                                        if i.is_match(path.as_os_str().as_bytes()) {
-                                                            to_include = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                    if !to_include {
-                                                        continue;
+                                            }
+                                            if !backup_cmd.include.is_empty() {
+                                                let mut to_include = false;
+                                                for i in &backup_cmd.include {
+                                                    if i.matches_path(&path) {
+                                                        to_include = true;
+                                                        break;
                                                     }
                                                 }
-                                                if !backup_cmd.include.is_empty() {
-                                                    let mut to_include = false;
-                                                    for i in &backup_cmd.include {
-                                                        if i.matches_path(&path) {
-                                                            to_include = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                    if !to_include {
-                                                        continue;
-                                                    }
-                                                }
-                                                // check exclude filters
-                                                if !backup_cmd.exclude_regex.is_empty() {
-                                                    for e in &backup_cmd.exclude_regex {
-                                                        if e.is_match(path.as_os_str().as_bytes()) {
-                                                            continue;
-                                                        }
-                                                    }
-                                                }
-                                                if !backup_cmd.exclude.is_empty() {
-                                                    for e in &backup_cmd.exclude {
-                                                        if e.matches_path(&path) {
-                                                            continue;
-                                                        }
-                                                    }
-                                                }
-                                                // insert the new_file record
-                                                //debug!("Found file to backup: {path}", path=path.to_string_lossy());
-                                                match &entry.metadata() {
-                                                    Ok(attr) => {
-                                                        stmt.execute(serde_rusqlite::to_params_named_with_fields(&NewFile {
-                                                            id: 0,
-                                                            path: PathBuf::from(path),
-                                                            mtime: attr.mtime(),
-                                                            size: attr.size(),
-                                                            uid: attr.uid(),
-                                                            gid: attr.gid(),
-                                                            mode: attr.mode(),
-                                                            filetype: if path.is_dir() {FileType::Directory} else if path.is_symlink() {FileType::Symlink} else {FileType::File},
-                                                            symlink_target: if path.is_symlink() {Some(std::fs::read_link(&path)?)} else {None},
-                                                        }, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
-                                                        count += 1;
-                                                        if count % 1000 == 0 {
-                                                            debug!("Inserted {count} records");
-                                                        }
-                                                    },
-                                                    Err(e) => {
-                                                        warn!("Error reading metadata for file {f}: {e}, skipping", f=entry.path().to_string_lossy())
-                                                    },
+                                                if !to_include {
+                                                    continue;
                                                 }
                                             }
-                                            Err(e) => {
-                                                warn!("Error when walking directory {d}: {e}, skipping", d=entry.to_string_lossy());
-                                            },
+                                            // check exclude filters
+                                            if !backup_cmd.exclude_regex.is_empty() {
+                                                for e in &backup_cmd.exclude_regex {
+                                                    if e.is_match(path.as_os_str().as_bytes()) {
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                            if !backup_cmd.exclude.is_empty() {
+                                                for e in &backup_cmd.exclude {
+                                                    if e.matches_path(&path) {
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                            // insert the new_file record
+                                            //debug!("Found file to backup: {path}", path=path.to_string_lossy());
+                                            match &entry.metadata() {
+                                                Ok(attr) => {
+                                                    stmt.execute(serde_rusqlite::to_params_named_with_fields(&NewFile {
+                                                        id: 0,
+                                                        path: PathBuf::from(path),
+                                                        mtime: attr.mtime(),
+                                                        size: attr.size(),
+                                                        uid: attr.uid(),
+                                                        gid: attr.gid(),
+                                                        mode: attr.mode(),
+                                                        filetype: if path.is_dir() {FileType::Directory} else if path.is_symlink() {FileType::Symlink} else {FileType::File},
+                                                        symlink_target: if path.is_symlink() {Some(std::fs::read_link(&path)?)} else {None},
+                                                    }, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
+                                                    count += 1;
+                                                    if count % 1000 == 0 {
+                                                        debug!("Inserted {count} records");
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    warn!("Error reading metadata for file {f}: {e}, skipping", f=entry.path().to_string_lossy())
+                                                },
+                                            }
                                         }
+                                        Err(e) => {
+                                            warn!("Error when walking directory {d}: {e}, skipping", d=entry.to_string_lossy());
+                                        },
                                     }
-                                },
-                                Err(e) => {
-                                    warn!("Error when scanning glob match: {g}: {e}, skipping", g=g.as_str());
-                                },
-                            }
+                                }
+                            },
+                            Err(e) => {
+                                warn!("Error when scanning glob match: {g}: {e}, skipping", g=g.as_str());
+                            },
                         }
                     }
                 }
-                {
-                    // get the complete list of backup diffs from the db
-                    let sql = r#"
-                    with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
-                      select id, date_created, uuid, parent_backup_id, 0 as depth
-                      from backup
-                      where id = ?1
-                      union all
-                      select b.id, b.date_created, b.uuid, b.parent_backup_id, pb.depth+1 as depth
-                      from backup b
-                      join parent_backup pb 
-                        on pb.parent_backup_id = b.id),
-                    full_backup(backup_id, uid, gid, mode, is_deleted, file_id, tape_id, path, mtime, size, filetype, symlink_target) as materialized (
-                      select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target
-                      from (parent_backup pb
-                        join backup2file b2f
-                          on b2f.backup_id = pb.id
-                        join file f
-                          on b2f.file_id=f.id)
-                      join (parent_backup pb2
-                        join backup2file b2f2
-                          on b2f2.backup_id=pb2.id
-                        join file f2
-                          on b2f2.file_id=f2.id)
-                      on f.path=f2.path
-                        and f.mtime=f2.mtime
-                        and f.size=f2.size
-                        and f.filetype=f2.filetype
-                        and pb.depth <= pb2.depth
-                      group by 1,2,3,4,5,6,7,8,9,10,11,12
-                      having count(*)=1)
-                    select nf.id as new_file_id,
-                      nf.path as new_file_path,
-                      nf.mtime as new_file_mtime,
-                      nf.size as new_file_size,
-                      nf.uid as new_file_uid,
-                      nf.gid as new_file_gid,
-                      nf.mode as new_file_mode,
-                      nf.filetype as new_file_filetype,
-                      nf.symlink_target as new_file_symlink_target,
-                      fb.backup_id as full_backup_backup_id,
-                      fb.uid as full_backup_uid,
-                      fb.gid as full_backup_gid,
-                      fb.mode as full_backup_mode,
-                      fb.is_deleted as full_backup_is_deleted,
-                      fb.file_id as full_backup_file_id,
-                      fb.tape_id as full_backup_tape_id,
-                      fb.path as full_backup_path,
-                      fb.mtime as full_backup_mtime,
-                      fb.size as full_backup_size,
-                      fb.filetype as full_backup_filetype,
-                      fb.symlink_target as full_backup_symlink_target
-                    from new_file nf
-                    left join full_backup fb
-                      on fb.path=nf.path
-                      and fb.mtime=nf.mtime
-                      and fb.size=nf.size
-                      and fb.filetype=nf.filetype
-                    where (fb.path is null or fb.is_deleted) 
-                      and nf.path is not null
-                    union all
-                    select nf.id as new_file_id,
-                      nf.path as new_file_path,
-                      nf.mtime as new_file_mtime,
-                      nf.size as new_file_size,
-                      nf.uid as new_file_uid,
-                      nf.gid as new_file_gid,
-                      nf.mode as new_file_mode,
-                      nf.filetype as new_file_filetype,
-                      nf.symlink_target as new_file_symlink_target,
-                      fb.backup_id as full_backup_backup_id,
-                      fb.uid as full_backup_uid,
-                      fb.gid as full_backup_gid,
-                      fb.mode as full_backup_mode,
-                      fb.is_deleted as full_backup_is_deleted,
-                      fb.file_id as full_backup_file_id,
-                      fb.tape_id as full_backup_tape_id,
-                      fb.path as full_backup_path,
-                      fb.mtime as full_backup_mtime,
-                      fb.size as full_backup_size,
-                      fb.filetype as full_backup_filetype,
-                      fb.symlink_target as full_backup_symlink_target
-                    from full_backup fb
-                    left join new_file nf
-                      on fb.path=nf.path
-                      and fb.mtime=nf.mtime
-                      and fb.size=nf.size
-                      and fb.filetype=nf.filetype
-                    where fb.path is not null 
-                      and nf.path is null
-                    order by nf.path nulls last, fb.path nulls last
-                    "#;
-                    debug!("Running sql:\n{sql}\n");
-                    let mut stmt = tx.prepare(sql)?;
-                    let mut rows = stmt.query(params![parent_backup_id])?;
-                    while let Some(row) = rows.next()? {
-                        let backup_diff = BackupDiff {
-                            new_file: if row.get::<&str,Option<String>>("new_file_path")?.is_some() {
-                                Some(NewFile {
-                                    id: row.get("new_file_id")?,
-                                    path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&row.get::<&str,String>("new_file_path")?)?)),
-                                    mtime: row.get("new_file_mtime")?,
-                                    size: row.get("new_file_size")?,
-                                    uid: row.get("new_file_uid")?,
-                                    gid: row.get("new_file_gid")?,
-                                    mode: row.get("new_file_mode")?,
-                                    filetype: FileType::try_from(row.get::<&str,u8>("new_file_filetype")?)?,
-                                    symlink_target: if let Some(t) = row.get::<&str,Option<String>>("new_file_symlink_target")? {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&t)?)))} else {None},
-                                })
-                            } else {None},
-                            full_backup: if row.get::<&str,Option<String>>("full_backup_path")?.is_some() {
-                                Some(FullBackup {
-                                    backup_id: row.get("full_backup_backup_id")?,
-                                    uid: row.get("full_backup_uid")?,
-                                    gid: row.get("full_backup_gid")?,
-                                    mode: row.get("full_backup_mode")?,
-                                    is_deleted: row.get("full_backup_is_deleted")?,
-                                    file_id: row.get("full_backup_file_id")?,
-                                    tape_id: row.get("full_backup_tape_id")?,
-                                    path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&row.get::<&str,String>("full_backup_path")?)?)),
-                                    mtime: row.get("full_backup_mtime")?,
-                                    size: row.get("full_backup_size")?,
-                                    filetype: FileType::try_from(row.get::<&str,u8>("full_backup_filetype")?)?,
-                                    symlink_target: if let Some(t) = row.get::<&str,Option<String>>("full_backup_symlink_target")? {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&t)?)))} else {None},
-                                })
-                            } else {None},
-                        };
-                        if let Some(new_file) = &backup_diff.new_file {
-                            if backup_diff.full_backup.is_none() {
-                                // add new_file record to to_copy
-                                to_copy.push(new_file.clone());
-                            }
-                        }
-                        // add backup_diff record to backup_diffs
-                        backup_diffs.push(backup_diff);
-                    }
-                }
-                tx.rollback()?;
             }
-            ctx.to_copy.extend(to_copy);
+            {
+                // get the complete list of backup diffs from the db
+                let sql = r#"
+                with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
+                    select id, date_created, uuid, parent_backup_id, 0 as depth
+                    from backup
+                    where id = ?1
+                    union all
+                    select b.id, b.date_created, b.uuid, b.parent_backup_id, pb.depth+1 as depth
+                    from backup b
+                    join parent_backup pb 
+                    on pb.parent_backup_id = b.id),
+                full_backup(backup_id, uid, gid, mode, is_deleted, file_id, tape_id, path, mtime, size, filetype, symlink_target) as materialized (
+                    select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target
+                    from (parent_backup pb
+                    join backup2file b2f
+                        on b2f.backup_id = pb.id
+                    join file f
+                        on b2f.file_id=f.id)
+                    join (parent_backup pb2
+                    join backup2file b2f2
+                        on b2f2.backup_id=pb2.id
+                    join file f2
+                        on b2f2.file_id=f2.id)
+                    on f.path=f2.path
+                    and f.mtime=f2.mtime
+                    and f.size=f2.size
+                    and f.filetype=f2.filetype
+                    and pb.depth <= pb2.depth
+                    group by 1,2,3,4,5,6,7,8,9,10,11,12
+                    having count(*)=1)
+                select nf.id as new_file_id,
+                    nf.path as new_file_path,
+                    nf.mtime as new_file_mtime,
+                    nf.size as new_file_size,
+                    nf.uid as new_file_uid,
+                    nf.gid as new_file_gid,
+                    nf.mode as new_file_mode,
+                    nf.filetype as new_file_filetype,
+                    nf.symlink_target as new_file_symlink_target,
+                    fb.backup_id as full_backup_backup_id,
+                    fb.uid as full_backup_uid,
+                    fb.gid as full_backup_gid,
+                    fb.mode as full_backup_mode,
+                    fb.is_deleted as full_backup_is_deleted,
+                    fb.file_id as full_backup_file_id,
+                    fb.tape_id as full_backup_tape_id,
+                    fb.path as full_backup_path,
+                    fb.mtime as full_backup_mtime,
+                    fb.size as full_backup_size,
+                    fb.filetype as full_backup_filetype,
+                    fb.symlink_target as full_backup_symlink_target
+                from new_file nf
+                left join full_backup fb
+                    on fb.path=nf.path
+                    and fb.mtime=nf.mtime
+                    and fb.size=nf.size
+                    and fb.filetype=nf.filetype
+                where (fb.path is null or fb.is_deleted) 
+                    and nf.path is not null
+                union all
+                select nf.id as new_file_id,
+                    nf.path as new_file_path,
+                    nf.mtime as new_file_mtime,
+                    nf.size as new_file_size,
+                    nf.uid as new_file_uid,
+                    nf.gid as new_file_gid,
+                    nf.mode as new_file_mode,
+                    nf.filetype as new_file_filetype,
+                    nf.symlink_target as new_file_symlink_target,
+                    fb.backup_id as full_backup_backup_id,
+                    fb.uid as full_backup_uid,
+                    fb.gid as full_backup_gid,
+                    fb.mode as full_backup_mode,
+                    fb.is_deleted as full_backup_is_deleted,
+                    fb.file_id as full_backup_file_id,
+                    fb.tape_id as full_backup_tape_id,
+                    fb.path as full_backup_path,
+                    fb.mtime as full_backup_mtime,
+                    fb.size as full_backup_size,
+                    fb.filetype as full_backup_filetype,
+                    fb.symlink_target as full_backup_symlink_target
+                from full_backup fb
+                left join new_file nf
+                    on fb.path=nf.path
+                    and fb.mtime=nf.mtime
+                    and fb.size=nf.size
+                    and fb.filetype=nf.filetype
+                where fb.path is not null 
+                    and nf.path is null
+                order by nf.path nulls last, fb.path nulls last
+                "#;
+                debug!("Running sql:\n{sql}\n");
+                let mut stmt = tx.prepare(sql)?;
+                let mut rows = stmt.query(params![parent_backup_id])?;
+                while let Some(row) = rows.next()? {
+                    let backup_diff = BackupDiff {
+                        new_file: if row.get::<&str,Option<String>>("new_file_path")?.is_some() {
+                            Some(NewFile {
+                                id: row.get("new_file_id")?,
+                                path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&row.get::<&str,String>("new_file_path")?)?)),
+                                mtime: row.get("new_file_mtime")?,
+                                size: row.get("new_file_size")?,
+                                uid: row.get("new_file_uid")?,
+                                gid: row.get("new_file_gid")?,
+                                mode: row.get("new_file_mode")?,
+                                filetype: FileType::try_from(row.get::<&str,u8>("new_file_filetype")?)?,
+                                symlink_target: if let Some(t) = row.get::<&str,Option<String>>("new_file_symlink_target")? {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&t)?)))} else {None},
+                            })
+                        } else {None},
+                        full_backup: if row.get::<&str,Option<String>>("full_backup_path")?.is_some() {
+                            Some(FullBackup {
+                                backup_id: row.get("full_backup_backup_id")?,
+                                uid: row.get("full_backup_uid")?,
+                                gid: row.get("full_backup_gid")?,
+                                mode: row.get("full_backup_mode")?,
+                                is_deleted: row.get("full_backup_is_deleted")?,
+                                file_id: row.get("full_backup_file_id")?,
+                                tape_id: row.get("full_backup_tape_id")?,
+                                path: PathBuf::from(OsString::from_vec(stfu8::decode_u8(&row.get::<&str,String>("full_backup_path")?)?)),
+                                mtime: row.get("full_backup_mtime")?,
+                                size: row.get("full_backup_size")?,
+                                filetype: FileType::try_from(row.get::<&str,u8>("full_backup_filetype")?)?,
+                                symlink_target: if let Some(t) = row.get::<&str,Option<String>>("full_backup_symlink_target")? {Some(PathBuf::from(OsString::from_vec(stfu8::decode_u8(&t)?)))} else {None},
+                            })
+                        } else {None},
+                    };
+                    if let Some(new_file) = &backup_diff.new_file {
+                        if backup_diff.full_backup.is_none() {
+                            // add new_file record to to_copy
+                            to_copy.push_back(new_file.clone());
+                        }
+                    }
+                    // add backup_diff record to backup_diffs
+                    backup_diffs.push(backup_diff);
+                }
+            }
+            tx.rollback()?;
         }
-        if let Ok(ctx) = ctx.lock() {
-            debug!("Found {} backup_diff records, {} to_copy records", backup_diffs.len(), ctx.to_copy.len());
-        }
+        debug!("Found {} backup_diff records, {} to_copy records", backup_diffs.len(), to_copy.len());
 
         if ! backup_cmd.dry_run {
-            if let (Ok(mut conn), Ok(ctx)) = (conn.lock(), ctx.lock()) {
-                let backup_id = if let Some(backup) = &ctx.backup {Some(backup.id)} else {None};
-                if let Some(backup_id) = &backup_id {
-                    let tx = conn.transaction()?;
-                    {
-                        let mut count = 0;
-                        let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
-                        for backup_diff in &backup_diffs {
-                            if let Some(full_backup) = &backup_diff.full_backup {
-                                // creating a new db record using already backed up file
-                                // don't need to transfer anything
-                                if let Some(new_file) = &backup_diff.new_file {
-                                    b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
-                                        backup_id: *backup_id,
-                                        file_id: full_backup.file_id,
-                                        uid: new_file.uid,
-                                        gid: new_file.gid,
-                                        mode: new_file.mode,
-                                        is_deleted: false,
-                                    })?.to_slice().as_slice())?;
-                                    count += 1;
-                                }
-                                // create a deletion record
-                                else {
-                                    b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
-                                        backup_id: *backup_id,
-                                        file_id: full_backup.file_id,
-                                        uid: full_backup.uid,
-                                        gid: full_backup.gid,
-                                        mode: full_backup.mode,
-                                        is_deleted: true,
-                                    })?.to_slice().as_slice())?;
-                                    count += 1;
-                                }
+            let backup_id = if let Some(backup) = &backup {Some(backup.id)} else {None};
+            if let Some(backup_id) = &backup_id {
+                let tx = conn.transaction()?;
+                {
+                    let mut count = 0;
+                    let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
+                    for backup_diff in &backup_diffs {
+                        if let Some(full_backup) = &backup_diff.full_backup {
+                            // creating a new db record using already backed up file
+                            // don't need to transfer anything
+                            if let Some(new_file) = &backup_diff.new_file {
+                                b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
+                                    backup_id: *backup_id,
+                                    file_id: full_backup.file_id,
+                                    uid: new_file.uid,
+                                    gid: new_file.gid,
+                                    mode: new_file.mode,
+                                    is_deleted: false,
+                                })?.to_slice().as_slice())?;
+                                count += 1;
+                            }
+                            // create a deletion record
+                            else {
+                                b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
+                                    backup_id: *backup_id,
+                                    file_id: full_backup.file_id,
+                                    uid: full_backup.uid,
+                                    gid: full_backup.gid,
+                                    mode: full_backup.mode,
+                                    is_deleted: true,
+                                })?.to_slice().as_slice())?;
+                                count += 1;
                             }
                         }
-                        debug!("Inserted {count} backup2file diff records");
                     }
-                    tx.commit()?;
+                    debug!("Inserted {count} backup2file diff records");
                 }
-            }
-            else {
-                Err(eyre!("No backup record set"))?
+                tx.commit()?;
             }
         }
 
         // now transfer the files
         // produce a timestamp string
         let mut date_created = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
-        if let Ok(ctx) = ctx.lock() {
-            if let Some(backup) = &ctx.backup {
-                date_created = backup.date_created;
-            }
+        if let Some(backup) = &backup {
+            date_created = backup.date_created;
         }
         let naive = NaiveDateTime::from_timestamp(date_created, 0);
         let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
@@ -1179,424 +1146,351 @@ impl Options {
         ].iter().collect::<PathBuf>();
         debug!("dest={dest}", dest=dest.to_string_lossy());
 
-        debug!("set save_queued_files");
-        let save_queued_files = {
-            let conn = conn.clone();
-            let ctx = ctx.clone();
-            Arc::new(Mutex::new(move || -> Result<()> {
-                if let (Ok(mut conn), Ok(mut ctx)) = (conn.lock(), ctx.lock()) {
-                    if ! ctx.queued_files.is_empty() {
-                        let tape = ctx.tape.clone();
-                        let backup = ctx.backup.clone();
-                        if let (Some(tape), Some(backup)) = (&tape, &backup) {
-                            let label = tape.label.as_ref().ok_or_else(|| eyre!("No label found for tape {tape}", tape=tape.index))?.clone();
-                            let tape_record = ctx.tapes.get(&label).ok_or_else(|| eyre!("No tape record found for {label}"))?.clone();
-                            let tx = conn.transaction()?;
-                            {
-                                let mut file_stmt = tx.prepare(r#"insert into file (tape_id,path,mtime,size,symlink_target) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target) returning *"#)?;
-                                let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
-                                for queued_file in &ctx.queued_files {
-                                    // write file and backup2file db records
-                                    let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(File{
-                                        id: 0,
-                                        tape_id: tape_record.id,
-                                        path: queued_file.path.clone(),
-                                        mtime: queued_file.mtime,
-                                        size: queued_file.size,
-                                        filetype: queued_file.filetype,
-                                        symlink_target: queued_file.symlink_target.clone(),
-                                    }, &["tape_id","path","mtime","size","filetype","symlink_target"])?.to_slice().as_slice())?;
-                                    let mut rows_iter = serde_rusqlite::from_rows::<File>(rows);
-                                    if let Some(file) = rows_iter.next() {
-                                        let file = file?;
-                                        b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
-                                            backup_id: backup.id,
-                                            file_id: file.id,
-                                            uid: queued_file.uid,
-                                            gid: queued_file.gid,
-                                            mode: queued_file.mode,
-                                            is_deleted: false,
-                                        })?.to_slice().as_slice())?;
-                                    }
-                                }
-                            }
-                            tx.commit()?;
-                            debug!("Finished creating file records for {} files", ctx.queued_files.len());
-                            ctx.queued_files.clear();
-                        }
-                    }
+        let mut old_tape = Option::<String>::None;
+        while ! to_copy.is_empty() {
+            let tape = if !backup_cmd.dry_run {Some(self.ready_storage()?)} else {None};
+
+            // update the tape db records
+            {
+                tapes.clear();
+                let mut stmt = conn.prepare("select * from tape")?;
+                let mut rows_iter = serde_rusqlite::from_rows::<Tape>(stmt.query([])?);
+                while let Some(tape) = rows_iter.next() {
+                    let tape = tape?;
+                    tapes.insert(tape.label.clone(), tape);
                 }
-                Ok(())
-            }))
-        };
-
-        // attempt to save any queued files to the database if ctrl+c is pressed
-        // or the process gets a termination signal
-        debug!("set ctrl+c handler");
-        {
-            let save_queued_files = save_queued_files.clone();
-            ctrlc::set_handler(move || {
-                if let Ok(save_queued_files) = save_queued_files.lock() {
-                    save_queued_files().expect("Failed to save queued files");
-                }
-            })?;
-        }
-
-        let catch = || -> Result<()> {
-            debug!("Entered catch handler");
-            let mut old_tape = Option::<String>::None;
-            let mut start = Instant::now();
-
-            let mut to_copy_is_empty = true;
-            if let Ok(ctx) = ctx.lock() {
-                to_copy_is_empty = ctx.to_copy.is_empty();
+                debug!("updated tapes records: {tapes:#?}", tapes=tapes);
             }
-            while ! to_copy_is_empty {
-                debug!("Entered ctx lock");
-                if let Ok(mut ctx) = ctx.lock() {
-                    ctx.tape = if !backup_cmd.dry_run {Some(self.ready_storage()?)} else {None};
-                    if let Some(tape) = &ctx.tape {
-                        if old_tape != tape.label {
-                            debug!("Using tape {label:#?}", label=tape.label);
-                            old_tape = tape.label.clone();
+
+            let label = if let Some(tape) = &tape {Some(tape.label.as_ref().ok_or_else(|| eyre!("No label found for tape {tape}", tape=tape.index))?)} else {None};
+            let tape_record = if let Some(label) = label {Some(tapes.get(label).ok_or_else(|| eyre!("No tape record found for {label}"))?)} else {None};
+
+            if let Some(tape) = &tape {
+                if old_tape != tape.label {
+                    debug!("Using tape {label:#?}", label=tape.label);
+                    old_tape = tape.label.clone();
+                }
+            }
+            let mut tape_full = false;
+            let mut old_dir = Option::<(PathBuf, i64)>::None;
+            while let Some(file) = to_copy.pop_front() {
+                trace!("Handling file {file:#?}");
+                if let Some(file_name) = file.path.file_name() {
+                    let file_path = PathBuf::from(file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
+                    let file_path = file_path.strip_prefix("/").unwrap_or_else(|_| file_path.as_path());
+
+                    let dest_path = [
+                        &dest.as_path(), 
+                        &file_path,
+                    ].iter().collect::<PathBuf>();
+                    // make sure dest path exists
+                    trace!("Create parent directories: {}", dest_path.to_string_lossy());
+                    if let Err(e) = std::fs::create_dir_all(&dest_path) {
+                        if self.is_tape_full()? {
+                            tape_full = true;
+                            break;
+                        }
+                        else {
+                            Err(e)?
                         }
                     }
-                }
-                let mut tape_full = false;
-                let mut old_dir = Option::<(PathBuf, i64)>::None;
-                debug!("getting lock");
-                let mut next_file = Option::<NewFile>::None;
-                if let Ok(mut ctx) = ctx.lock() {
-                    next_file = ctx.to_copy.pop_front();
-                }
-                while let Some(file) = &next_file {
-                    trace!("Handling file {file:#?}");
-                    if let Ok(mut ctx) = ctx.lock() {
-                        trace!("Entered lock");
-                        if let Some(file_name) = file.path.file_name() {
-                            let file_path = PathBuf::from(file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
-                            let file_path = file_path.strip_prefix("/").unwrap_or_else(|_| file_path.as_path());
-
-                            let dest_path = [
-                                &dest.as_path(), 
-                                &file_path,
-                            ].iter().collect::<PathBuf>();
-                            // make sure dest path exists
-                            trace!("Create parent directories: {}", dest_path.to_string_lossy());
-                            if let Err(e) = std::fs::create_dir_all(&dest_path) {
-                                if self.is_tape_full()? {
-                                    tape_full = true;
-                                    break;
-                                }
-                                else {
-                                    Err(e)?
-                                }
-                            }
-                            // check if we need to set old_dir's mtime
-                            if ! backup_cmd.dry_run {
-                                if let Some(old_dir) = &old_dir {
-                                    if dest_path != old_dir.0 {
-                                        trace!("old_dir changed from {old_dir:#?} to {dest_path}, setting mtime on old_dir", dest_path=dest_path.to_string_lossy());
-                                        let mtime = FileTime::from_unix_time(old_dir.1, 0);
-                                        if let Err(e) = filetime::set_file_times(&old_dir.0, mtime.clone(), mtime.clone()) {
-                                            if self.is_tape_full()? {
-                                                tape_full = true;
-                                                break;
-                                            }
-                                            else {
-                                                Err(e)?
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            // handle file types
-                            match file.filetype {
-                                FileType::Directory => {
-                                    trace!("is a directory");
-                                    let destdir = [
-                                        &dest_path,
-                                        &PathBuf::from(file_name),
-                                    ].iter().collect::<PathBuf>();
-                                    trace!("destdir={destdir}", destdir=destdir.to_string_lossy());
-
-                                    info!("{path}/ -> {destdir}/", path=file.path.to_string_lossy(), destdir=destdir.to_string_lossy());
-                                    if ! backup_cmd.dry_run {
-                                        // create the directory
-                                        trace!("create directory {destdir}", destdir=destdir.to_string_lossy());
-                                        if let Err(e) = std::fs::create_dir(&destdir) {
-                                            if self.is_tape_full()? {
-                                                tape_full = true;
-                                                break;
-                                            }
-                                            else {
-                                                Err(e)?
-                                            }
-                                        }
-                                    }
-                                    // set old_dir so we can set the mtime later
-                                    old_dir = Some((destdir.clone(), file.mtime));
-                                    trace!("set old_dir to {old_dir:#?}");
-                                },
-                                FileType::Symlink => {
-                                    trace!("is a symlink");
-                                    // create the symlink
-                                    let dest_file = [
-                                        &dest_path, 
-                                        &PathBuf::from(file_name),
-                                    ].iter().collect::<PathBuf>();
-                                    trace!("dest_file={dest_file}", dest_file=dest_file.to_string_lossy());
-
-                                    if let Some(target) = &file.symlink_target {
-                                        info!("{path} -> {dest_file} ({target})", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy(), target=target.to_string_lossy());
-                                        if ! backup_cmd.dry_run {
-                                            trace!("symlink {target} to {dest_file}", target=target.to_string_lossy(), dest_file=dest_file.to_string_lossy());
-                                            if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
-                                                if self.is_tape_full()? {
-                                                    tape_full = true;
-                                                    break;
-                                                }
-                                                else {
-                                                    Err(e)?
-                                                }
-                                            }
-                                            // set the symlinks's mtime
-                                            trace!("set symlink {dest_file} mtime", dest_file=dest_file.to_string_lossy());
-                                            let mtime = FileTime::from_unix_time(file.mtime, 0);
-                                            if let Err(e) = filetime::set_symlink_file_times(&dest_file, mtime.clone(), mtime.clone()) {
-                                                if self.is_tape_full()? {
-                                                    tape_full = true;
-                                                    break;
-                                                }
-                                                else {
-                                                    Err(e)?
-                                                }
-                                            }
-                                        }
+                    // check if we need to set old_dir's mtime
+                    if ! backup_cmd.dry_run {
+                        if let Some(old_dir) = &old_dir {
+                            if dest_path != old_dir.0 {
+                                trace!("old_dir changed from {old_dir:#?} to {dest_path}, setting mtime on old_dir", dest_path=dest_path.to_string_lossy());
+                                let mtime = FileTime::from_unix_time(old_dir.1, 0);
+                                if let Err(e) = filetime::set_file_times(&old_dir.0, mtime.clone(), mtime.clone()) {
+                                    if self.is_tape_full()? {
+                                        tape_full = true;
+                                        break;
                                     }
                                     else {
-                                        Err(eyre!("Symlink record {file:#?} has null symlink_target field!"))?;
+                                        Err(e)?
                                     }
-                                },
-                                FileType::File => {
-                                    // copy file to temp path first
-                                    trace!("is a file");
-                                    let randext = rand::thread_rng()
-                                        .sample_iter(&Alphanumeric)
-                                        .take(10)
-                                        .map(char::from)
-                                        .collect::<String>();
-                                    let mut tmp_file_name = Vec::<u8>::new();
-                                    tmp_file_name.extend(b".");
-                                    tmp_file_name.extend(file_name.as_bytes());
-                                    tmp_file_name.extend(b".");
-                                    tmp_file_name.extend(randext.as_bytes());
-                                    let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
-                                    trace!("tmp_file_name={tmp_file_name}", tmp_file_name=tmp_file_name.to_string_lossy());
-
-                                    let tmp_file = [
-                                        &dest_path, 
-                                        &tmp_file_name,
-                                    ].iter().collect::<PathBuf>();
-                                    trace!("tmp_file={tmp_file}", tmp_file=tmp_file.to_string_lossy());
-
-                                    let dest_file = [
-                                        &dest_path, 
-                                        &PathBuf::from(file_name),
-                                    ].iter().collect::<PathBuf>();
-                                    trace!("dest_file={dest_file}", dest_file=dest_file.to_string_lossy());
-
-                                    info!("{path} -> {dest_file}", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy());
-                                    if ! backup_cmd.dry_run {
-                                        trace!("copy {file_path} to {tmp_file}", file_path=file.path.to_string_lossy(), tmp_file=tmp_file.to_string_lossy());
-                                        if let Err(e) = std::fs::copy(&file.path, &tmp_file) {
-                                            if self.is_tape_full()? {
-                                                tape_full = true;
-                                                break;
-                                            }
-                                            else if !file.path.exists() {
-                                                error!("File {} no longer exists, skipping backup!", file.path.to_string_lossy());
-                                                continue;
-                                            }
-                                            else {
-                                                Err(e)?
-                                            }
-                                        }
-                                        // set the file's mtime
-                                        trace!("set mtime on {tmp_file}", tmp_file=tmp_file.to_string_lossy());
-                                        let mtime = FileTime::from_unix_time(file.mtime, 0);
-                                        if let Err(e) = filetime::set_file_times( &tmp_file, mtime.clone(), mtime.clone()) {
-                                            if self.is_tape_full()? {
-                                                tape_full = true;
-                                                break;
-                                            }
-                                            else {
-                                                Err(e)?
-                                            }
-                                        }
-                                        // then move file into place
-                                        trace!("move {tmp_file} to {dest_file}", tmp_file=tmp_file.to_string_lossy(), dest_file=dest_file.to_string_lossy());
-                                        if let Err(e) = std::fs::rename(&tmp_file, dest_file) {
-                                            if self.is_tape_full()? {
-                                                tape_full = true;
-                                                break;
-                                            }
-                                            else {
-                                                Err(e)?
-                                            }
-                                        }
-                                    }
-                                },
-                            };
-                            // add file to the queued_files list
-                            ctx.queued_files.push(file.clone());
-                        }
-                        next_file = ctx.to_copy.pop_front();
-                    }
-
-                    // wait db_write_wait seconds before writing db records
-                    let duration = start.elapsed();
-                    if duration.as_secs() >= backup_cmd.db_write_wait {
-                        if ! backup_cmd.dry_run {
-                            if let Ok(save_queued_files) = save_queued_files.lock() {
-                                save_queued_files()?;
+                                }
                             }
                         }
-                        start = Instant::now();
                     }
-                }
-                // check if we need to set old_dir's mtime
-                if ! backup_cmd.dry_run {
-                    if let Some(old_dir) = old_dir {
-                        let mtime = FileTime::from_unix_time(old_dir.1, 0);
-                        if let Err(e) = filetime::set_file_times(&old_dir.0, mtime.clone(), mtime.clone()) {
-                            if self.is_tape_full()? {
-                                tape_full = true;
+                    // handle file types
+                    match file.filetype {
+                        FileType::Directory => {
+                            trace!("is a directory");
+                            let destdir = [
+                                &dest_path,
+                                &PathBuf::from(file_name),
+                            ].iter().collect::<PathBuf>();
+                            trace!("destdir={destdir}", destdir=destdir.to_string_lossy());
+
+                            info!("{path}/ -> {destdir}/", path=file.path.to_string_lossy(), destdir=destdir.to_string_lossy());
+                            if ! backup_cmd.dry_run {
+                                // create the directory
+                                trace!("create directory {destdir}", destdir=destdir.to_string_lossy());
+                                if let Err(e) = std::fs::create_dir(&destdir) {
+                                    if self.is_tape_full()? {
+                                        tape_full = true;
+                                        break;
+                                    }
+                                    else {
+                                        Err(e)?
+                                    }
+                                }
+                            }
+                            // set old_dir so we can set the mtime later
+                            old_dir = Some((destdir.clone(), file.mtime));
+                            trace!("set old_dir to {old_dir:#?}");
+                        },
+                        FileType::Symlink => {
+                            trace!("is a symlink");
+                            // create the symlink
+                            let dest_file = [
+                                &dest_path, 
+                                &PathBuf::from(file_name),
+                            ].iter().collect::<PathBuf>();
+                            trace!("dest_file={dest_file}", dest_file=dest_file.to_string_lossy());
+
+                            if let Some(target) = &file.symlink_target {
+                                info!("{path} -> {dest_file} ({target})", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy(), target=target.to_string_lossy());
+                                if ! backup_cmd.dry_run {
+                                    trace!("symlink {target} to {dest_file}", target=target.to_string_lossy(), dest_file=dest_file.to_string_lossy());
+                                    if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
+                                        if self.is_tape_full()? {
+                                            tape_full = true;
+                                            break;
+                                        }
+                                        else {
+                                            Err(e)?
+                                        }
+                                    }
+                                    // set the symlinks's mtime
+                                    trace!("set symlink {dest_file} mtime", dest_file=dest_file.to_string_lossy());
+                                    let mtime = FileTime::from_unix_time(file.mtime, 0);
+                                    if let Err(e) = filetime::set_symlink_file_times(&dest_file, mtime.clone(), mtime.clone()) {
+                                        if self.is_tape_full()? {
+                                            tape_full = true;
+                                            break;
+                                        }
+                                        else {
+                                            Err(e)?
+                                        }
+                                    }
+                                }
                             }
                             else {
-                                Err(e)?
+                                Err(eyre!("Symlink record {file:#?} has null symlink_target field!"))?;
                             }
-                        }
-                    }
-                }
-                // The tape has become full. 
-                // we need to re-mount the filesystem to ensure we're using the most 
-                // recent index that was able to be written. Then we need to
-                // scan the ltfs filesystem to verify which files actually
-                // were transferred successfully.
-                // Any files that were not included in the last written ltfs index
-                // partition will now be missing, and should be deleted from the database.
-                if ! backup_cmd.dry_run && tape_full {
-                    info!("The tape became full, re-mounting LTFS and verifying files");
-                    if let Ok(save_queued_files) = save_queued_files.lock() {
-                        save_queued_files()?;
-                    }
-                    self.unmount_tape()?;
-                    self.mount_tape()?;
+                        },
+                        FileType::File => {
+                            // copy file to temp path first
+                            trace!("is a file");
+                            let randext = rand::thread_rng()
+                                .sample_iter(&Alphanumeric)
+                                .take(10)
+                                .map(char::from)
+                                .collect::<String>();
+                            let mut tmp_file_name = Vec::<u8>::new();
+                            tmp_file_name.extend(b".");
+                            tmp_file_name.extend(file_name.as_bytes());
+                            tmp_file_name.extend(b".");
+                            tmp_file_name.extend(randext.as_bytes());
+                            let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
+                            trace!("tmp_file_name={tmp_file_name}", tmp_file_name=tmp_file_name.to_string_lossy());
 
-                    let mut to_delete = LinkedList::<NewFile>::new();
-                    if let (Ok(mut conn), Ok(mut ctx)) = (conn.lock(), ctx.lock()) {
+                            let tmp_file = [
+                                &dest_path, 
+                                &tmp_file_name,
+                            ].iter().collect::<PathBuf>();
+                            trace!("tmp_file={tmp_file}", tmp_file=tmp_file.to_string_lossy());
+
+                            let dest_file = [
+                                &dest_path, 
+                                &PathBuf::from(file_name),
+                            ].iter().collect::<PathBuf>();
+                            trace!("dest_file={dest_file}", dest_file=dest_file.to_string_lossy());
+
+                            info!("{path} -> {dest_file}", path=file.path.to_string_lossy(), dest_file=dest_file.to_string_lossy());
+                            if ! backup_cmd.dry_run {
+                                trace!("copy {file_path} to {tmp_file}", file_path=file.path.to_string_lossy(), tmp_file=tmp_file.to_string_lossy());
+                                if let Err(e) = std::fs::copy(&file.path, &tmp_file) {
+                                    if self.is_tape_full()? {
+                                        tape_full = true;
+                                        break;
+                                    }
+                                    else if !file.path.exists() {
+                                        error!("File {} no longer exists, skipping backup!", file.path.to_string_lossy());
+                                        continue;
+                                    }
+                                    else {
+                                        Err(e)?
+                                    }
+                                }
+                                // set the file's mtime
+                                trace!("set mtime on {tmp_file}", tmp_file=tmp_file.to_string_lossy());
+                                let mtime = FileTime::from_unix_time(file.mtime, 0);
+                                if let Err(e) = filetime::set_file_times( &tmp_file, mtime.clone(), mtime.clone()) {
+                                    if self.is_tape_full()? {
+                                        tape_full = true;
+                                        break;
+                                    }
+                                    else {
+                                        Err(e)?
+                                    }
+                                }
+                                // then move file into place
+                                trace!("move {tmp_file} to {dest_file}", tmp_file=tmp_file.to_string_lossy(), dest_file=dest_file.to_string_lossy());
+                                if let Err(e) = std::fs::rename(&tmp_file, dest_file) {
+                                    if self.is_tape_full()? {
+                                        tape_full = true;
+                                        break;
+                                    }
+                                    else {
+                                        Err(e)?
+                                    }
+                                }
+                            }
+                        },
+                    };
+                    // add file and backup2file records to the database
+                    {
                         let tx = conn.transaction()?;
-                        {
-                            let sql = r#"
-                            select f.id, f.path, f.mtime, f.size, b2f.uid, b2f.gid, b2f.mode, f.filetype, f.symlink_target
-                            from backup2file b2f
-                            join file f
-                            on b2f.file_id=f.file_id
-                            where b2f.backup_id=?1
-                            and f.tape_id=?2
-                            order by f.path nulls last
-                            "#;
-                            let mut stmt = tx.prepare(sql)?;
-                            let backup = ctx.backup.as_ref().ok_or_else(|| eyre!("No backup found"))?;
-                            let backup_id = backup.id;
-                            let tape = ctx.tape.as_ref().ok_or_else(|| eyre!("No tape record is set"))?;
-                            let label = tape.label.as_ref().ok_or_else(|| eyre!("No label found for tape {tape}", tape=tape.index))?;
-                            let tape_record = ctx.tapes.get(label).ok_or_else(|| eyre!("No tape record found for {label}"))?;
-                            let rows = stmt.query(params![backup_id, tape_record.id])?;
-                            let mut rows_iter = serde_rusqlite::from_rows::<NewFile>(rows);
-                            while let Some(new_file) = rows_iter.next() {
-                                let new_file = new_file?;
-                                let new_file_path = PathBuf::from(new_file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
-                                let new_file_path = new_file_path.strip_prefix("/").unwrap_or_else(|_| new_file_path.as_path());
-
-                                let path = [
-                                    &dest.as_path(),
-                                    &new_file_path,
-                                ].iter().collect::<PathBuf>();
-                                let mut file_exists = false;
-                                if path.exists() {
-                                    match new_file.filetype {
-                                        FileType::File => {
-                                            if path.is_file() {
-                                                if let Ok(md) = std::fs::symlink_metadata(&dest) {
-                                                    if md.size() == new_file.size && md.mtime() == new_file.mtime {
-                                                        file_exists = true;
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        FileType::Directory => {
-                                            file_exists = path.is_dir();
-                                        },
-                                        FileType::Symlink => {
-                                            if let Some(symlink_target) = &new_file.symlink_target {
-                                                if path.is_symlink() {
-                                                    let target = std::fs::read_link(&path)?;
-                                                    file_exists = target == *symlink_target;
-                                                }
-                                            } 
-                                            else {
-                                                file_exists = true;
-                                            }
-                                        },
-                                    };
-                                }
-                                if ! file_exists {
-                                    to_delete.push_back(new_file);
-                                }
-
-                            }
-                            // remove db records for missing files
-                            for new_file in &to_delete {
-                                tx.execute(r#"delete from backup2file where backup_id=?1 and file_id=?2"#, params![backup_id, new_file.id])?; 
-                                tx.execute(r#"delete from file where id=?1"#, params![new_file.id])?; 
+                        if let (Some(backup), Some(tape_record)) = (&backup, tape_record) {
+                            let mut file_stmt = tx.prepare(r#"insert into file (tape_id,path,mtime,size,filetype,symlink_target) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target) returning *"#)?;
+                            let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
+                            // write file and backup2file db records
+                            let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(File{
+                                id: 0,
+                                tape_id: tape_record.id,
+                                path: file.path.clone(),
+                                mtime: file.mtime,
+                                size: file.size,
+                                filetype: file.filetype,
+                                symlink_target: file.symlink_target.clone(),
+                            }, &["tape_id","path","mtime","size","filetype","symlink_target"])?.to_slice().as_slice())?;
+                            let mut rows_iter = serde_rusqlite::from_rows::<File>(rows);
+                            if let Some(file_record) = rows_iter.next() {
+                                let file_record = file_record?;
+                                b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
+                                    backup_id: backup.id,
+                                    file_id: file_record.id,
+                                    uid: file.uid,
+                                    gid: file.gid,
+                                    mode: file.mode,
+                                    is_deleted: false,
+                                })?.to_slice().as_slice())?;
                             }
                         }
                         tx.commit()?;
-                        info!("Verification complete, removed {count} files from the database", count=to_delete.len());
-
-                        // re-enqueue the files to be copied again
-                        to_delete.append(&mut ctx.to_copy);
-                        ctx.to_copy = to_delete;
                     }
                 }
-                if let Ok(ctx) = ctx.lock() {
-                    to_copy_is_empty = ctx.to_copy.is_empty();
+            }
+            // check if we need to set old_dir's mtime
+            if ! backup_cmd.dry_run {
+                if let Some(old_dir) = old_dir {
+                    let mtime = FileTime::from_unix_time(old_dir.1, 0);
+                    if let Err(e) = filetime::set_file_times(&old_dir.0, mtime.clone(), mtime.clone()) {
+                        if self.is_tape_full()? {
+                            tape_full = true;
+                        }
+                        else {
+                            Err(e)?
+                        }
+                    }
                 }
             }
-            Ok(())
-        };
-        debug!("run catch");
-        let result = catch();
-        if let Ok(save_queued_files) = save_queued_files.lock() {
-            save_queued_files()?;
-        }
-        if let Err(e) = result {
-            Err(e)?
+            // The tape has become full. 
+            // we need to re-mount the filesystem to ensure we're using the most 
+            // recent index that was able to be written. Then we need to
+            // scan the ltfs filesystem to verify which files actually
+            // were transferred successfully.
+            // Any files that were not included in the last written ltfs index
+            // partition will now be missing, and should be deleted from the database.
+            if ! backup_cmd.dry_run && tape_full {
+                info!("The tape became full, re-mounting LTFS and verifying files");
+                self.unmount_tape()?;
+                self.mount_tape()?;
+
+                let mut to_delete = LinkedList::<NewFile>::new();
+                let tx = conn.transaction()?;
+                if let Some(backup) = &backup {
+                    let sql = r#"
+                    select f.id, f.path, f.mtime, f.size, b2f.uid, b2f.gid, b2f.mode, f.filetype, f.symlink_target
+                    from backup2file b2f
+                    join file f
+                    on b2f.file_id=f.file_id
+                    where b2f.backup_id=?1
+                    and f.tape_id=?2
+                    order by f.path nulls last
+                    "#;
+                    let mut stmt = tx.prepare(sql)?;
+                    let backup_id = backup.id;
+                    let tape = tape.as_ref().ok_or_else(|| eyre!("No tape record is set"))?;
+                    let label = tape.label.as_ref().ok_or_else(|| eyre!("No label found for tape {tape}", tape=tape.index))?;
+                    let tape_record = tapes.get(label).ok_or_else(|| eyre!("No tape record found for {label}"))?;
+                    let rows = stmt.query(params![backup_id, tape_record.id])?;
+                    let mut rows_iter = serde_rusqlite::from_rows::<NewFile>(rows);
+                    while let Some(new_file) = rows_iter.next() {
+                        let new_file = new_file?;
+                        let new_file_path = PathBuf::from(new_file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
+                        let new_file_path = new_file_path.strip_prefix("/").unwrap_or_else(|_| new_file_path.as_path());
+
+                        let path = [
+                            &dest.as_path(),
+                            &new_file_path,
+                        ].iter().collect::<PathBuf>();
+                        let mut file_exists = false;
+                        if path.exists() {
+                            match new_file.filetype {
+                                FileType::File => {
+                                    if !path.is_symlink() && path.is_file() {
+                                        if let Ok(md) = std::fs::symlink_metadata(&dest) {
+                                            if md.size() == new_file.size && md.mtime() == new_file.mtime {
+                                                file_exists = true;
+                                            }
+                                        }
+                                    }
+                                },
+                                FileType::Directory => {
+                                    file_exists = !path.is_symlink() && path.is_dir();
+                                },
+                                FileType::Symlink => {
+                                    if let Some(symlink_target) = &new_file.symlink_target {
+                                        if path.is_symlink() {
+                                            let target = std::fs::read_link(&path)?;
+                                            file_exists = target == *symlink_target;
+                                        }
+                                    } 
+                                    else {
+                                        file_exists = true;
+                                    }
+                                },
+                            };
+                        }
+                        if ! file_exists {
+                            to_delete.push_back(new_file);
+                        }
+
+                    }
+                    // remove db records for missing files
+                    for new_file in &to_delete {
+                        tx.execute(r#"delete from backup2file where backup_id=?1 and file_id=?2"#, params![backup_id, new_file.id])?; 
+                        tx.execute(r#"delete from file where id=?1"#, params![new_file.id])?; 
+                    }
+                }
+                tx.commit()?;
+                info!("Verification complete, removed {count} files from the database", count=to_delete.len());
+
+                // re-enqueue the files to be copied again
+                to_delete.append(&mut to_copy);
+                to_copy = to_delete;
+            }
         }
 
         // set the backup complete flag in the db
         if ! backup_cmd.dry_run {
-            if let (Ok(conn), Ok(ctx)) = (conn.lock(), ctx.lock()) {
-                if let Some(backup) = &ctx.backup {
-                    let sql = r#"update backup set is_complete=true where backup_id=?1"#;
-                    debug!("Running sql update:\n{sql}\n");
-                    conn.execute(sql, params![backup.id])?;
-                }
-            }
-            else {
-                Err(eyre!("No backup record set"))?
+            if let Some(backup) = &backup {
+                let sql = r#"update backup set is_complete=true where backup_id=?1"#;
+                debug!("Running sql update:\n{sql}\n");
+                conn.execute(sql, params![backup.id])?;
             }
         }
         info!("Backup complete");
@@ -2233,7 +2127,7 @@ fn main() -> Result<()> {
     let mut options = Options::from_args();
 
     let logspec = if options.trace {"TRACE"} else if options.verbose {"DEBUG"} else {"INFO"};
-    Logger::try_with_env_or_str(logspec)?.start()?;
+    Logger::try_with_env_or_str(logspec)?.format(flexi_logger::detailed_format).start()?;
     debug!("Parsed options: {options:#?}");
 
     options.mtx = match which(&options.mtx) {
