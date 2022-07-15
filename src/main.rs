@@ -57,6 +57,8 @@ struct BackupCmd {
     patterns: Vec<Pattern>,
     #[structopt(long = "dry-run", help = "Do not actually backup any files, just show what files would be backed up")]
     dry_run: bool,
+    #[structopt(long = "tape-full-test", help = "Perform a test of the tape full handling routine at the end of this backup.")]
+    tape_full_test: bool,
 }
 
 #[derive(StructOpt, Debug)]
@@ -569,18 +571,18 @@ impl Options {
         debug!("Running wait_for_ltfs_process_to_terminate");
         let mut system = sysinfo::System::new();
         for _ in 0..600 {
-            debug!("Refreshing processes");
+            trace!("Refreshing processes");
             system.refresh_processes();
             let mut found_ltfs = false;
             for (_pid, process) in system.processes() {
-                debug!("Checking process: {process:#?} with name \"{name}\", exe \"{exe}\", cmd \"{cmd:#?}\"",
+                trace!("Checking process: {process:#?} with name \"{name}\", exe \"{exe}\", cmd \"{cmd:#?}\"",
                     name=process.name(),
                     exe=process.exe().to_string_lossy(),
                     cmd=process.cmd());
                 if process.name() == "ltfs" || 
                     regex_is_match!(r#"(^|/)ltfs$"#, &process.exe().to_string_lossy()) || (!process.cmd().is_empty() && regex_is_match!(r#"(^|/)ltfs$"#, &process.cmd()[0]))
                 {
-                    debug!("Found matching process");
+                    trace!("Found matching process");
                     found_ltfs = true;
                     break;
                 }
@@ -1454,7 +1456,7 @@ impl Options {
             // were transferred successfully.
             // Any files that were not included in the last written ltfs index
             // partition will now be missing, and should be deleted from the database.
-            if ! backup_cmd.dry_run && tape_full {
+            if ! backup_cmd.dry_run && (tape_full || backup_cmd.tape_full_test) {
                 info!("The tape became full, re-mounting LTFS and verifying files");
                 self.unmount_tape()?;
                 self.mount_tape()?;
@@ -1466,63 +1468,91 @@ impl Options {
                     select f.id, f.path, f.mtime, f.size, b2f.uid, b2f.gid, b2f.mode, f.filetype, f.symlink_target
                     from backup2file b2f
                     join file f
-                    on b2f.file_id=f.file_id
+                    on b2f.file_id=f.id
                     where b2f.backup_id=?1
                     and f.tape_id=?2
                     order by f.path nulls last
                     "#;
+                    debug!("Running sql: {sql}");
                     let mut stmt = tx.prepare(sql)?;
                     let backup_id = backup.id;
                     let tape = tape.as_ref().ok_or_else(|| eyre!("No tape record is set"))?;
+                    debug!("tape={tape:#?}");
                     let label = tape.label.as_ref().ok_or_else(|| eyre!("No label found for tape {tape}", tape=tape.index))?;
+                    debug!("label={tape:#?}");
                     let tape_record = tapes.get(label).ok_or_else(|| eyre!("No tape record found for {label}"))?;
+                    debug!("tape_record={tape:#?}");
                     let rows = stmt.query(params![backup_id, tape_record.id])?;
                     let mut rows_iter = serde_rusqlite::from_rows::<NewFile>(rows);
                     while let Some(new_file) = rows_iter.next() {
                         let new_file = new_file?;
-                        let new_file_path = PathBuf::from(new_file.path.parent().unwrap_or(PathBuf::from(".").as_path()));
-                        let new_file_path = new_file_path.strip_prefix("/").unwrap_or_else(|_| new_file_path.as_path());
+                        trace!("new_file={new_file:#?}");
+                        let new_file_path = new_file.path.strip_prefix("/").unwrap_or_else(|_| new_file.path.as_path());
+                        trace!("new_file_path={new_file_path:#?}");
 
                         let path = PathBuf::from(stfu8::encode_u8_pretty([
                             &dest.as_path(),
                             &new_file_path,
                         ].iter().collect::<PathBuf>().as_os_str().as_bytes()));
+                        trace!("path={path}", path=path.to_string_lossy());
                         let mut file_exists = false;
                         if path.exists() {
                             match new_file.filetype {
                                 FileType::File => {
+                                    trace!("is a file");
                                     if !path.is_symlink() && path.is_file() {
+                                        trace!("found file {path}", path=path.to_string_lossy());
                                         if let Ok(md) = std::fs::symlink_metadata(&dest) {
                                             if md.size() == new_file.size && md.mtime() == new_file.mtime {
+                                                trace!("sizes and mtimes match, files are the same");
                                                 file_exists = true;
+                                            }
+                                            else {
+                                                trace!("sizes and mtimes do NOT match, files are different");
                                             }
                                         }
                                     }
                                 },
                                 FileType::Directory => {
+                                    trace!("is a directory");
                                     file_exists = !path.is_symlink() && path.is_dir();
                                 },
                                 FileType::Symlink => {
+                                    trace!("is a symlink");
                                     if let Some(symlink_target) = &new_file.symlink_target {
+                                        trace!("symlink_target={symlink_target}", symlink_target=symlink_target.to_string_lossy());
                                         if path.is_symlink() {
+                                            trace!("found symlink at path");
                                             let target = std::fs::read_link(&path)?;
-                                            file_exists = target == *symlink_target;
+                                            if target == *symlink_target {
+                                                trace!("targets match: {target}", target=target.to_string_lossy());
+                                                file_exists = true;
+                                            }
+                                            else {
+                                                trace!("targets do NOT match: {} vs {}", target.to_string_lossy(), symlink_target.to_string_lossy());
+                                            }
                                         }
                                     } 
                                     else {
-                                        file_exists = true;
+                                        Err(eyre!("Symlink {new_file:#?} is missing symlink_target!"))?
                                     }
                                 },
                             };
                         }
                         if ! file_exists {
+                            trace!("File {new_file:#?} does not exist, queueing for deletion");
                             to_delete.push_back(new_file);
                         }
                     }
                     // remove db records for missing files
                     for new_file in &to_delete {
-                        tx.execute(r#"delete from backup2file where backup_id=?1 and file_id=?2"#, params![backup_id, new_file.id])?; 
-                        tx.execute(r#"delete from file where id=?1"#, params![new_file.id])?; 
+                        trace!("Removing records for {new_file:#?}");
+                        let sql = r#"delete from backup2file where backup_id=?1 and file_id=?2"#;
+                        trace!("Running sql delete:\n{sql}\n");
+                        tx.execute(sql, params![backup_id, new_file.id])?; 
+                        let sql = r#"delete from file where id=?1"#;
+                        trace!("Running sql delete:\n{sql}\n");
+                        tx.execute(sql, params![new_file.id])?; 
                     }
                 }
                 tx.commit()?;
