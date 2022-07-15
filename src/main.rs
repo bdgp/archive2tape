@@ -1198,11 +1198,11 @@ impl Options {
                     }
                     // check if we need to set old_dir's mtime
                     if ! backup_cmd.dry_run {
-                        if let Some(old_dir) = &old_dir {
-                            if dest_path != old_dir.0 {
-                                trace!("old_dir changed from {old_dir:#?} to {dest_path}, setting mtime on old_dir", dest_path=dest_path.to_string_lossy());
-                                let mtime = FileTime::from_unix_time(old_dir.1, 0);
-                                if let Err(e) = filetime::set_file_times(&old_dir.0, mtime.clone(), mtime.clone()) {
+                        if let Some((old_dir, mtime)) = &old_dir {
+                            if dest_path != *old_dir {
+                                trace!("old_dir changed from {old_dir} to {dest_path}, setting mtime on old_dir", old_dir=old_dir.to_string_lossy(), dest_path=dest_path.to_string_lossy());
+                                let mtime = FileTime::from_unix_time(*mtime, 0);
+                                if let Err(e) = filetime::set_file_times(&old_dir, mtime.clone(), mtime.clone()) {
                                     if self.is_tape_full()? {
                                         tape_full = true;
                                         break;
@@ -1680,8 +1680,7 @@ impl Options {
                     }
                 }
 
-                let full_backup_path = PathBuf::from(full_backup.path.parent().unwrap_or(PathBuf::from(".").as_path()));
-                let full_backup_path = full_backup_path.strip_prefix("/").unwrap_or_else(|_| full_backup_path.as_path());
+                let full_backup_path = full_backup.path.strip_prefix("/").unwrap_or_else(|_| full_backup.path.as_path());
                 let source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
                     &source_path.as_path(),
                     &full_backup_path,
@@ -1713,6 +1712,7 @@ impl Options {
                         trace!("is a directory");
                         info!("{source}/ -> {dest}/", source=source.to_string_lossy(), dest=dest.to_string_lossy());
                         let mut mtime = full_backup.mtime;
+                        let md = std::fs::symlink_metadata(&dest).ok(); 
                         if ! restore_cmd.dry_run {
                             trace!("mkdir {} with mode {}", dest.to_string_lossy(), full_backup.mode);
                             match nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode)) {
@@ -1721,7 +1721,7 @@ impl Options {
                             }
                             trace!("chown {}", dest.to_string_lossy());
                             nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
-                            if let Ok(md) = std::fs::symlink_metadata(&dest) {
+                            if let Some(md) = md {
                                 let current_mtime = FileTime::from_last_modification_time(&md);
                                 mtime = std::cmp::max(mtime, current_mtime.unix_seconds());
                             }
@@ -1759,7 +1759,7 @@ impl Options {
                         }
                     },
                     FileType::File => {
-                        trace!("is a file");
+                        trace!("{} is a file", dest.to_string_lossy());
                         if dest.exists() {
                             if restore_cmd.noclobber {
                                 continue;
