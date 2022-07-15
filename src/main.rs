@@ -443,7 +443,11 @@ impl Options {
                 debug!("{element:#?}");
                 elements.push(element);
             }
+            else {
+                debug!("Could not parse line: {line}");
+            }
         }
+        debug!("elements.len: {}", elements.len());
         debug!("elements: {elements:#?}");
         Ok(elements)
     }
@@ -642,6 +646,9 @@ impl Options {
 
     fn format_ltfs(&self) -> Result<()> {
         debug!("Running mkltfs commmand");
+        if self.is_mounted()? {
+            Err(eyre!("Can't format mounted tape, please unmount first"))?
+        }
         let output = cmd!(&self.mkltfs, "-d", &self.ltfs_drive).unchecked().run()?;
         match output.status.code() {
             Some(16) => {
