@@ -905,7 +905,7 @@ impl Options {
                                             //debug!("Found file to backup: {path}", path=path.to_string_lossy());
                                             match &entry.metadata() {
                                                 Ok(attr) => {
-                                                    stmt.execute(serde_rusqlite::to_params_named_with_fields(&NewFile {
+                                                    let new_file = &NewFile {
                                                         id: 0,
                                                         path: PathBuf::from(path),
                                                         mtime: attr.mtime(),
@@ -913,12 +913,14 @@ impl Options {
                                                         uid: attr.uid(),
                                                         gid: attr.gid(),
                                                         mode: attr.mode(),
-                                                        filetype: if path.is_dir() {FileType::Directory} else if path.is_symlink() {FileType::Symlink} else {FileType::File},
+                                                        filetype: if path.is_symlink() {FileType::Symlink} else if path.is_dir() {FileType::Directory} else {FileType::File},
                                                         symlink_target: if path.is_symlink() {Some(std::fs::read_link(&path)?)} else {None},
-                                                    }, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
+                                                    };
+                                                    trace!("Inserting new_file record: {new_file:#?}");
+                                                    stmt.execute(serde_rusqlite::to_params_named_with_fields(&new_file, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
                                                     count += 1;
                                                     if count % 1000 == 0 {
-                                                        debug!("Inserted {count} records");
+                                                        debug!("Inserted {count} new_file records");
                                                     }
                                                 },
                                                 Err(e) => {
@@ -1609,7 +1611,7 @@ impl Options {
               and pb.depth <= pb2.depth
             group by 1,2,3,4,5,6,7,8,9,10,11,12
             having count(*)=1
-            order by f.tape_id nulls last, f.path nulls last
+            order by f.tape_id, f.path
             "#;
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(sql)?;
@@ -1619,6 +1621,7 @@ impl Options {
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
+                trace!("Handling full_backup record: {full_backup:#?}");
                 if ! restore_cmd.patterns.is_empty() {
                     let mut found_match = false;
                     for pattern in &restore_cmd.patterns {
@@ -1687,26 +1690,36 @@ impl Options {
                     &restore_cmd.restore_path.as_path(),
                     &full_backup_path,
                 ].iter().collect::<PathBuf>();
+                trace!("full_backup_path={full_backup_path}", full_backup_path=full_backup_path.to_string_lossy());
 
                 if let Some(parent) = dest.parent() {
                     // set the mtime of the previous directory if it's done
                     // being written
                     if let Some((od, mtime)) = &old_dir {
                         if od != parent {
+                            trace!("set mtime of old_dir {od} to {mtime}", od=od.to_string_lossy());
                             let filetime = FileTime::from_unix_time(*mtime, 0);
                             filetime::set_file_times(od, filetime.clone(), filetime.clone())?;
                             old_dir = None;
                         }
                     }
+                    trace!("create parent directories for {}", parent.to_string_lossy());
                     std::fs::create_dir_all(parent)?;
                 }
                 // transfer the file
+                trace!("Checking type of full_backup {full_backup:#?}");
                 match full_backup.filetype {
                     FileType::Directory => {
+                        trace!("is a directory");
                         info!("{source}/ -> {dest}/", source=source.to_string_lossy(), dest=dest.to_string_lossy());
                         let mut mtime = full_backup.mtime;
                         if ! restore_cmd.dry_run {
-                            nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode))?;
+                            trace!("mkdir {} with mode {}", dest.to_string_lossy(), full_backup.mode);
+                            match nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode)) {
+                                Ok(_) | Err(nix::errno::Errno::EEXIST) => (),
+                                Err(e) => Err(e)?,
+                            }
+                            trace!("chown {}", dest.to_string_lossy());
                             nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
                             if let Ok(md) = std::fs::symlink_metadata(&dest) {
                                 let current_mtime = FileTime::from_last_modification_time(&md);
@@ -1716,6 +1729,7 @@ impl Options {
                         old_dir = Some((dest, mtime));
                     },
                     FileType::Symlink => {
+                        trace!("is a symlink");
                         if dest.exists() && restore_cmd.noclobber {
                             continue;
                         }
@@ -1725,13 +1739,27 @@ impl Options {
                         let target = full_backup.symlink_target.ok_or_else(|| eyre!("Symlink target is null!"))?;
                         info!("{source} -> {dest} ({target})", source=source.to_string_lossy(), dest=dest.to_string_lossy(), target=target.to_string_lossy());
                         if ! restore_cmd.dry_run {
-                            std::os::unix::fs::symlink(&target, &dest)?;
+                            if dest.exists() {
+                                trace!("remove destination {}", dest.to_string_lossy());
+                                std::fs::remove_file(&dest)?;
+                            }
+                            
+                            trace!("create symlink {} {}", dest.to_string_lossy(), target.to_string_lossy());
+                            if let Err(e) = std::os::unix::fs::symlink(&target, &dest) {
+                                if !dest.exists() || std::fs::read_link(&dest)? != dest {
+                                    Err(e)?
+                                }
+                            }
+
+                            trace!("chown {}", dest.to_string_lossy());
                             nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                            trace!("set mtime for  {}", dest.to_string_lossy());
                             let filetime = FileTime::from_unix_time(full_backup.mtime, 0);
                             filetime::set_symlink_file_times(&dest, filetime.clone(), filetime.clone())?;
                         }
                     },
                     FileType::File => {
+                        trace!("is a file");
                         if dest.exists() {
                             if restore_cmd.noclobber {
                                 continue;
@@ -1741,18 +1769,23 @@ impl Options {
                             }
 
                             // if mtime and size is the same, skip copying the file
+                            trace!("check if file {} is already up to date", dest.to_string_lossy());
                             let attr = std::fs::symlink_metadata(&dest)?;
                             if dest.is_file() && attr.mtime() == full_backup.mtime && attr.size() == full_backup.size {
+                                trace!("file {} is already up to date", dest.to_string_lossy());
                                 if ! restore_cmd.dry_run {
                                     // set uid:gid
+                                    trace!("chown {}", dest.to_string_lossy());
                                     nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
                                     // set mode
+                                    trace!("chmod {}", dest.to_string_lossy());
                                     std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
                                 }
                                 continue;
                             }
-                            if ! restore_cmd.dry_run {
+                            else if ! restore_cmd.dry_run {
                                 // remove existing destination file to break any hard links
+                                trace!("remove existing file {}", dest.to_string_lossy());
                                 std::fs::remove_file(&dest)?;
                             }
                         }
@@ -1773,6 +1806,7 @@ impl Options {
                                     &PathBuf::from(dest_path), 
                                     &tmp_file_name,
                                 ].iter().collect::<PathBuf>();
+                                trace!("tmp_file = {}", tmp_file.to_string_lossy());
 
                                 info!("{source} -> {dest}", source=source.to_string_lossy(), dest=dest.to_string_lossy());
 
@@ -1806,15 +1840,23 @@ impl Options {
                                         old_tape_id = Some(full_backup.tape_id);
                                     }
                                     // copy the file
+                                    trace!("source={source}", source=source.to_string_lossy());
+                                    trace!("tmp_file={tmp_file}", tmp_file=tmp_file.to_string_lossy());
+                                    trace!("dest={dest}", dest=dest.to_string_lossy());
+                                    trace!("copying {} to {}", source.to_string_lossy(), tmp_file.to_string_lossy());
                                     std::fs::copy(&source, &tmp_file)?;
                                     // set uid:gid
+                                    trace!("chown {}", tmp_file.to_string_lossy());
                                     nix::unistd::chown(&tmp_file, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
                                     // set mode
+                                    trace!("chmod {}", tmp_file.to_string_lossy());
                                     std::fs::set_permissions(&tmp_file, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                    trace!("set mtime for {}", tmp_file.to_string_lossy());
                                     // set the file's mtime
                                     let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
                                     filetime::set_file_times(&tmp_file, mtime.clone(), mtime.clone())?;
                                     // then move file into place
+                                    trace!("move {} to {}", tmp_file.to_string_lossy(), dest.to_string_lossy());
                                     std::fs::rename(&tmp_file, dest)?;
                                 }
                             }
@@ -1832,6 +1874,7 @@ impl Options {
             if let Some((old_dir, mtime)) = &old_dir {
                 let filetime = FileTime::from_unix_time(*mtime, 0);
                 if ! restore_cmd.dry_run {
+                    trace!("set mtime for old_dir {} to {}", old_dir.to_string_lossy(), mtime);
                     filetime::set_file_times(old_dir, filetime.clone(), filetime.clone())?;
                 }
             }
