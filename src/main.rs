@@ -547,8 +547,7 @@ impl Options {
                     exe=process.exe().to_string_lossy(),
                     cmd=process.cmd());
                 if process.name() == "ltfs" || 
-                    regex_is_match!(r#"(^|/)ltfs$"#, &process.exe().to_string_lossy()) ||
-                    regex_is_match!(r#"(^|/)ltfs$"#, &process.cmd()[0])
+                    regex_is_match!(r#"(^|/)ltfs$"#, &process.exe().to_string_lossy()) || (!process.cmd().is_empty() && regex_is_match!(r#"(^|/)ltfs$"#, &process.cmd()[0]))
                 {
                     debug!("Found matching process");
                     found_ltfs = true;
