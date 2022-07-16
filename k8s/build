@@ -6,6 +6,6 @@ img=${DOCKER_IMAGE:-archive2tape}
 (cd .. && nix build -o k8s/result)
 
 #./result/archive2tape-image |docker load && docker push "$dr/$img"
-#./result/archive2tape-image |gzip --fast |skopeo --insecure-policy copy --dest-tls-verify=false docker-archive:/dev/stdin docker://"$dr/$img"
+./result/archive2tape-image |gzip --fast |skopeo --insecure-policy copy --dest-tls-verify=false docker-archive:/dev/stdin docker://"$dr/$img"
 
-k8script.py --node ubx --privileged -v /media --hide-nix --env LOCALE_ARCHIVE=/lib/locale/locale-archive --launcher -i "$dr/$img" sh -c ''
+k8script.py --su-exec --init-script 'ln -s /proc/self/mounts /etc/mtab' --node ubx --privileged -B /media -v /home/bbooth --hide-nix --env LOCALE_ARCHIVE=/lib/locale/locale-archive --launcher -i "$dr/$img" sh -c ''

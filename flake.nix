@@ -53,7 +53,6 @@
             extraCommands = ''
             mkdir -p -m 0755 usr/bin usr/local nix/store etc
             ln -sfvn /bin/env usr/bin/env
-            ln -s /proc/self/mounts etc/mtab
             '';
           };
           archive2tape-result = pkgs.stdenv.mkDerivation rec {
