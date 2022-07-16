@@ -149,7 +149,6 @@ enum Command {
 #[derive(StructOpt, Debug)]
 #[structopt(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::UnifiedHelpMessage])]
 struct Options {
-    //#[structopt(long = "drive", help = "Path to tape drive device", name="DEVICE", default_value="/dev/tape/by-id/scsi-35000e111c89b5001-nst")]
     #[structopt(long = "drive", help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/tape/by-path/pci-0000:b3:00.0-sas-0x5000e111c89b5002-lun-0-nst")]
     drive: PathBuf,
     #[structopt(long = "ltfs-drive", help = "Path to tape drive device to use for ltfs", name="LTFS_DRIVE_DEVICE", default_value="/dev/sg2")]
@@ -524,15 +523,9 @@ impl Options {
             let conn = Connection::open(tapes_db)?;
 
             let mut stmt = conn.prepare("select * from tape")?;
-            let tape_iter = stmt.query_map([], |row| {
-                Ok(Tape{
-                    id: row.get(0)?,
-                    label: row.get(1)?,
-                    is_full: row.get(2)?,
-                    date_added: row.get(3)?,
-                })
-            })?;
-            for tape in tape_iter {
+            let rows = stmt.query(params![])?;
+            let mut rows_iter = serde_rusqlite::from_rows::<Tape>(rows);
+            while let Some(tape) = rows_iter.next() {
                 let tape = tape?;
                 tapes.push(tape);
             }
@@ -850,13 +843,8 @@ impl Options {
 
         // get the tape db records
         let mut tapes = LinkedHashMap::<String,Tape>::new();
-        {
-            let mut stmt = conn.prepare("select * from tape")?;
-            let mut rows_iter = serde_rusqlite::from_rows::<Tape>(stmt.query([])?);
-            while let Some(tape) = rows_iter.next() {
-                let tape = tape?;
-                tapes.insert(tape.label.clone(), tape);
-            }
+        for tape in self.tape_status()? {
+            tapes.insert(tape.label.clone(), tape);
         }
         debug!("got tapes records: {tapes:#?}");
 
@@ -1223,16 +1211,12 @@ impl Options {
             let tape = if !backup_cmd.dry_run {Some(self.ready_storage()?)} else {None};
 
             // update the tape db records
-            {
-                tapes.clear();
-                let mut stmt = conn.prepare("select * from tape")?;
-                let mut rows_iter = serde_rusqlite::from_rows::<Tape>(stmt.query([])?);
-                while let Some(tape) = rows_iter.next() {
-                    let tape = tape?;
-                    tapes.insert(tape.label.clone(), tape);
-                }
-                debug!("updated tapes records: {tapes:#?}", tapes=tapes);
+            tapes.clear();
+            for tape in self.tape_status()? {
+                tapes.insert(tape.label.clone(), tape);
             }
+
+            debug!("updated tapes records: {tapes:#?}", tapes=tapes);
 
             let label = if let Some(tape) = &tape {Some(tape.label.as_ref().ok_or_else(|| eyre!("No label found for tape {tape}", tape=tape.index))?)} else {None};
             let tape_record = if let Some(label) = label {Some(tapes.get(label).ok_or_else(|| eyre!("No tape record found for {label}"))?)} else {None};
@@ -1624,13 +1608,8 @@ impl Options {
 
         // get the tape db records
         let mut tapes = LinkedHashMap::<i64,Tape>::new();
-        {
-            let mut stmt = conn.prepare("select * from tape")?;
-            let mut rows_iter = serde_rusqlite::from_rows::<Tape>(stmt.query([])?);
-            while let Some(tape) = rows_iter.next() {
-                let tape = tape?;
-                tapes.insert(tape.id, tape);
-            }
+        for tape in self.tape_status()? {
+            tapes.insert(tape.id, tape);
         }
         debug!("got tapes records: {tapes:#?}");
 
@@ -2069,13 +2048,8 @@ impl Options {
 
         // get the tape db records
         let mut tapes = LinkedHashMap::<i64,Tape>::new();
-        {
-            let mut stmt = conn.prepare("select * from tape")?;
-            let mut rows_iter = serde_rusqlite::from_rows::<Tape>(stmt.query([])?);
-            while let Some(tape) = rows_iter.next() {
-                let tape = tape?;
-                tapes.insert(tape.id, tape);
-            }
+        for tape in self.tape_status()? {
+            tapes.insert(tape.id, tape);
         }
         debug!("got tapes records: {tapes:#?}");
 
