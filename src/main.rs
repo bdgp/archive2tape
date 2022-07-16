@@ -149,23 +149,23 @@ enum Command {
 #[derive(StructOpt, Debug)]
 #[structopt(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::UnifiedHelpMessage])]
 struct Options {
-    #[structopt(long = "drive", help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/tape/by-path/pci-0000:b3:00.0-sas-0x5000e111c89b5002-lun-0-nst")]
+    #[structopt(long = "drive", help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/st1")]
     drive: PathBuf,
     #[structopt(long = "ltfs-drive", help = "Path to tape drive device to use for ltfs", name="LTFS_DRIVE_DEVICE", default_value="/dev/sg2")]
     ltfs_drive: PathBuf,
-    #[structopt(long = "loader", help = "Path to loader device", name="LOADER_DEVICE", default_value="/dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0")]
+    #[structopt(long = "loader", help = "Path to loader device", name="LOADER_DEVICE", default_value="/dev/sg4")]
     loader: PathBuf,
     #[structopt(long = "mtx", help = "Path to mtx command (from mtx package)", name="MTX_PATH", default_value="mtx")]
     mtx: PathBuf,
     #[structopt(long = "mt", help = "Path to mt command (from cpio package)", name="MT_PATH", default_value="mt")]
     mt: PathBuf,
-    #[structopt(long = "ltfs", help = "Path to ltfs command", name="LTFS_PATH", default_value="/usr/local/bin/ltfs")]
+    #[structopt(long = "ltfs", help = "Path to ltfs command", name="LTFS_PATH", default_value="ltfs")]
     ltfs: PathBuf,
-    #[structopt(long = "mkltfs", help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="/usr/local/bin/mkltfs")]
+    #[structopt(long = "mkltfs", help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="mkltfs")]
     mkltfs: PathBuf,
     #[structopt(long = "fusermount", help = "Path to fusermount command", name="FUSERMOUNT_PATH", default_value="fusermount")]
     fusermount: PathBuf,
-    #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="DB_PATH")]
+    #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="DB_PATH", default_value="./archive2tape.db")]
     db: PathBuf,
     #[structopt(long = "tapes-db", help = "Path to SQLite tapes metadata database", name="TAPES_DB_PATH")]
     tapes_db: Option<PathBuf>,
@@ -770,8 +770,26 @@ impl Options {
         Err(eyre!("Could not find any available tapes to use"))?
     }
 
-    fn init_db(&self) -> Result<()> {
+    fn init_db(&mut self) -> Result<()> {
         debug!("Called init_db");
+
+        if ! self.db.is_file() && !self.create_db {
+            Err(eyre!("Could not find metadata database: {db}. Try using --create-db or --db DB_NAME", db=self.db.display()))?
+        }
+        if let Some(tapes_db) = &self.tapes_db {
+            if ! tapes_db.is_file() && !self.create_db {
+                Err(eyre!("Could not find tapes metadata database: {tapes_db}", tapes_db=tapes_db.display()))?
+            }
+        }
+        else {
+            let mut tapes_db = self.db.clone();
+            tapes_db.set_file_name("tapes.db");
+            if ! tapes_db.is_file() && !self.create_db {
+                Err(eyre!("Could not find tapes metadata database: {tapes_db}", tapes_db=tapes_db.display()))?
+            }
+            self.tapes_db = Some(tapes_db);
+        }
+
         debug!("Connecting to db {db}", db=self.db.display());
         let conn = Connection::open(&self.db)?;
 
@@ -829,15 +847,16 @@ impl Options {
         Ok(())
     }
 
-    fn backup_files(&self) -> Result<()> {
+    fn backup_files(&mut self) -> Result<()> {
         debug!("Called backup_files");
+        self.init_db()?;
+
         let backup_cmd = match &self.cmd {
             Some(Command::Backup(b)) => b,
             _ => Err(eyre!("Couldn't match backup subcommand!"))?,
         };
 
         // initialize the backup set's sqlite database
-        self.init_db()?;
         debug!("Connecting to db {db}", db=self.db.display());
         let mut conn = Connection::open(&self.db)?;
 
@@ -1590,8 +1609,10 @@ impl Options {
         Ok(())
     }
 
-    fn restore_files(&self) -> Result<()> {
+    fn restore_files(&mut self) -> Result<()> {
         debug!("Running restore_files");
+        self.init_db()?;
+
         let restore_cmd = match &self.cmd {
             Some(Command::Restore(r)) => r,
             _ => Err(eyre!("Couldn't match restore subcommand!"))?,
@@ -1601,8 +1622,6 @@ impl Options {
         }
         debug!("Using restore_path: {}", restore_cmd.restore_path.to_string_lossy());
 
-        // initialize the backup set's sqlite database
-        self.init_db()?;
         debug!("Connecting to db {db}", db=&self.db.to_string_lossy());
         let conn = Connection::open(&self.db)?;
 
@@ -1980,8 +1999,10 @@ impl Options {
         Ok(())
     }
 
-    fn list_backups(&self) -> Result<()> {
+    fn list_backups(&mut self) -> Result<()> {
         debug!("Running list_backups");
+        self.init_db()?;
+
         let list_backups_cmd = match &self.cmd {
             Some(Command::ListBackups(l)) => l,
             _ => Err(eyre!("Couldn't match subcommand!"))?,
@@ -1991,7 +2012,6 @@ impl Options {
 
         let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
 
-        self.init_db()?;
         debug!("Connecting to database {db}", db=self.db.to_string_lossy());
         let conn = Connection::open(&self.db)?;
         {
@@ -2031,8 +2051,10 @@ impl Options {
         Ok(())
     }
 
-    fn list_files(&self) -> Result<()> {
+    fn list_files(&mut self) -> Result<()> {
         debug!("Running list_files");
+        self.init_db()?;
+
         let list_files_cmd = match &self.cmd {
             Some(Command::ListFiles(l)) => l,
             _ => Err(eyre!("Couldn't match subcommand!"))?,
@@ -2042,7 +2064,6 @@ impl Options {
 
         let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
 
-        self.init_db()?;
         debug!("Connecting to database {db}", db=self.db.to_string_lossy());
         let conn = Connection::open(&self.db)?;
 
@@ -2259,22 +2280,6 @@ fn main() -> Result<()> {
     if ! options.loader.exists() {
         Err(eyre!("Could not find loader device: {loader}", loader=options.loader.display()))?
     }
-    if ! options.db.is_file() && !options.create_db {
-        Err(eyre!("Could not find metadata database: {db}", db=options.db.display()))?
-    }
-    if let Some(tapes_db) = &options.tapes_db {
-        if ! tapes_db.is_file() && !options.create_db {
-            Err(eyre!("Could not find tapes metadata database: {tapes_db}", tapes_db=tapes_db.display()))?
-        }
-    }
-    else {
-        let mut tapes_db = options.db.clone();
-        tapes_db.set_file_name("tapes.db");
-        if ! tapes_db.is_file() && !options.create_db {
-            Err(eyre!("Could not find tapes metadata database: {tapes_db}", tapes_db=tapes_db.display()))?
-        }
-        options.tapes_db = Some(tapes_db);
-    }
     if ! options.ltfs_path.is_dir() {
         Err(eyre!("Could not find LTFS mount directory:: {ltfs_path}", ltfs_path=options.ltfs_path.display()))?
     }
@@ -2296,7 +2301,9 @@ fn main() -> Result<()> {
         Some(Command::WaitForDrive) => info!("{:#?}", options.wait_for_drive()),
         Some(Command::WaitForLTFSProcessToTerminate) => info!("{:#?}", options.wait_for_ltfs_process_to_terminate()),
         _ => {
-            eprintln!("Must specify one of: backup, restore, listbackups, listfiles");
+            Options::clap().print_long_help()?;
+            println!("");
+            println!("");
             std::process::exit(1);
         }
     };

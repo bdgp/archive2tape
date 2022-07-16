@@ -1,5 +1,5 @@
 [package]
-name = "tape-archives"
+name = "archive2tape"
 version = "0.1.0"
 edition = "2021"
 authors = ["Ben Booth <benwbooth@gmail.com>"]

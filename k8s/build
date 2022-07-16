@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -eux -o pipefail
+dr=${DOCKER_REGISTRY:-fiji.lbl.gov/bdgp}
+img=${DOCKER_IMAGE:-archive2tape}
+
+(cd .. && nix build -o k8s/result)
+
+#./result/archive2tape-image |docker load && docker push "$dr/$img"
+#./result/archive2tape-image |gzip --fast |skopeo --insecure-policy copy --dest-tls-verify=false docker-archive:/dev/stdin docker://"$dr/$img"
+
+k8script.py --node ubx --privileged -v /media --hide-nix --env LOCALE_ARCHIVE=/lib/locale/locale-archive --launcher -i "$dr/$img" sh -c ''
