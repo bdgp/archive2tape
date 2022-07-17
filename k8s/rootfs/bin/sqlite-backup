@@ -6,6 +6,10 @@ if [[ -z $DBPATH ]]; then
   echo "Usage: $0 DBPATH" >&2
   exit 1
 fi
+if [[ ! -e $DBPATH ]]; then
+  echo "Could not find file $DBPATH!" >&2
+  exit 1
+fi
 BACKUP_NAME=${BACKUP_NAME-$(basename "${DB_PATH%.db}")}
 BACKUP_DIR=${BACKUP_DIR-/backup}
 BACKUP_FILE="$BACKUP_DIR/${BACKUP_NAME}_$(date '+%Y-%m-%d-%H-%M-%S').db.gz"
@@ -18,7 +22,7 @@ UUID=$(head /dev/urandom |tr -dc A-Za-z0-9 |head -c 16)
 
 mkdir -pv "$BACKUP_DIR"
 set -x
-pigz < >"$BACKUP_FILE.$UUID.tmp"
+pigz <"$DBPATH" >"$BACKUP_FILE.$UUID.tmp"
 set +x
 mv -v "$BACKUP_FILE"{.$UUID.tmp,}
 
