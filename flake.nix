@@ -42,7 +42,7 @@
               bashInteractive coreutils findutils glibcLocales 
               archive2tape rotate-backups pigz gnugrep tini
               mtx mt-st fuse pspg less sqlite litecli
-              archive2tape su-exec nss_ldap rootfs ltfs
+              archive2tape su-exec nss_ldap rootfs ltfs strace
             ];
             config = {
               Env = [

@@ -153,7 +153,7 @@ struct Options {
     drive: PathBuf,
     #[structopt(long = "ltfs-drive", help = "Path to tape drive device to use for ltfs", name="LTFS_DRIVE_DEVICE", default_value="/dev/sg2")]
     ltfs_drive: PathBuf,
-    #[structopt(long = "loader", help = "Path to loader device", name="LOADER_DEVICE", default_value="/dev/sg4")]
+    #[structopt(long = "loader", help = "Path to loader device", name="LOADER_DEVICE", default_value="/dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0")]
     loader: PathBuf,
     #[structopt(long = "mtx", help = "Path to mtx command (from mtx package)", name="MTX_PATH", default_value="mtx")]
     mtx: PathBuf,
@@ -167,6 +167,10 @@ struct Options {
     fusermount: PathBuf,
     #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="DB_PATH", default_value="./archive2tape.db")]
     db: PathBuf,
+    #[structopt(long = "su-exc", help = "Path to su-exec binary", name="SU_EXEC_PATH", default_value="su-exec")]
+    su_exec: PathBuf,
+    #[structopt(long = "root", help = "Run external commands as root using su-exec command")]
+    root: bool,
     #[structopt(long = "tapes-db", help = "Path to SQLite tapes metadata database", name="TAPES_DB_PATH")]
     tapes_db: Option<PathBuf>,
     #[structopt(long = "create-db", help = "Create the metadata database if it doesn't exist")]
@@ -371,7 +375,12 @@ impl Options {
         let mut elements = Vec::<StorageElement>::new();
         // mtx -f /dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0 status
         debug!("Running mtx status command");
-        let mtx_cmd = cmd!(&self.mtx, "-f", &self.loader, "status");
+        let mtx_cmd = if self.root {
+            cmd!(&self.su_exec, "root:root", &self.mtx, "-f", &self.loader, "status")
+        }
+        else {
+            cmd!(&self.mtx, "-f", &self.loader, "status")
+        };
         let reader = mtx_cmd.reader()?;
         let reader = BufReader::new(reader);
 
@@ -569,7 +578,12 @@ impl Options {
         'WAIT_FOR_DRIVE:
         for _ in 0..300 {
             debug!("Running mt status command");
-            let mt_cmd = cmd!("mt","-f", &self.drive, "status");
+            let mt_cmd = if self.root {
+                cmd!(&self.su_exec,"root:root",&self.mt,"-f", &self.drive, "status")
+            }
+            else {
+                cmd!(&self.mt,"-f", &self.drive, "status")
+            };
             let reader = mt_cmd.reader()?;
             let reader = BufReader::new(reader);
 
@@ -623,7 +637,12 @@ impl Options {
         debug!("Running unmount_tape");
         if self.is_mounted()? {
             debug!("Running fusermount command");
-            cmd!(&self.fusermount, "-u", &self.ltfs_path).run()?;
+            if self.root {
+                cmd!(&self.su_exec,"root:root", &self.fusermount, "-u", &self.ltfs_path).run()?;
+            } 
+            else {
+                cmd!(&self.fusermount, "-u", &self.ltfs_path).run()?;
+            }
             self.wait_for_ltfs_process_to_terminate()?;
         }
         Ok(())
@@ -646,10 +665,20 @@ impl Options {
             
             self.unmount_tape()?;
             debug!("Running unload command");
-            cmd!(&self.mtx, "-f", &self.loader, "unload", empty_slot.index.to_string(), drive_slot.index.to_string()).run()?;
+            if self.root {
+                cmd!(&self.su_exec,"root:root" ,&self.mtx, "-f", &self.loader, "unload", empty_slot.index.to_string(), drive_slot.index.to_string()).run()?;
+            }
+            else {
+                cmd!(&self.mtx, "-f", &self.loader, "unload", empty_slot.index.to_string(), drive_slot.index.to_string()).run()?;
+            }
         }
         debug!("Running load commmand");
-        cmd!(&self.mtx, "-f", &self.loader, "load", slot.to_string(), drive_slot.index.to_string()).run()?;
+        if self.root {
+            cmd!(&self.su_exec,"root:root" ,&self.mtx, "-f", &self.loader, "load", slot.to_string(), drive_slot.index.to_string()).run()?;
+        }
+        else {
+            cmd!(&self.mtx, "-f", &self.loader, "load", slot.to_string(), drive_slot.index.to_string()).run()?;
+        }
         self.wait_for_drive()?;
         Ok(())
     }
@@ -658,7 +687,12 @@ impl Options {
         debug!("Running mount_tape");
         if ! self.is_mounted()? {
             debug!("Running ltfs commmand");
-            cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.ltfs_drive.to_string_lossy()), &self.ltfs_path).run()?;
+            if self.root {
+                cmd!(&self.su_exec,"root:root", &self.ltfs, "-o", format!("devname={drive}", drive=self.ltfs_drive.to_string_lossy()), &self.ltfs_path).run()?;
+            }
+            else {
+                cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.ltfs_drive.to_string_lossy()), &self.ltfs_path).run()?;
+            }
             if ! self.is_mounted()? {
                 Err(eyre!("path {ltfs_path} was not mounted", ltfs_path=self.ltfs_path.display()))?;
             }
@@ -674,7 +708,12 @@ impl Options {
         if self.is_mounted()? {
             Err(eyre!("Can't format mounted tape, please unmount first"))?
         }
-        let output = cmd!(&self.mkltfs, "-d", &self.ltfs_drive).unchecked().run()?;
+        let output = if self.root {
+            cmd!(&self.su_exec,"root:root", &self.mkltfs, "-d", &self.ltfs_drive).unchecked().run()?
+        }
+        else {
+            cmd!(&self.mkltfs, "-d", &self.ltfs_drive).unchecked().run()?
+        };
         match output.status.code() {
             Some(16) => {
                 debug!("mkltfs returned exit code 16, already formatted");
@@ -2273,6 +2312,12 @@ fn main() -> Result<()> {
         Ok(path) => path,
         Err(e) => Err(eyre!("Could not find fusermount program: {fusermount}: {e}", fusermount=options.fusermount.display()))?,
     };
+    if options.root {
+        options.su_exec = match which(&options.su_exec) {
+            Ok(path) => path,
+            Err(e) => Err(eyre!("Could not find su-exec program: {su_exec}: {e}", su_exec=options.su_exec.display()))?,
+        };
+    }
 
     if ! options.drive.exists() {
         Err(eyre!("Could not find drive device: {drive}", drive=options.drive.display()))?
