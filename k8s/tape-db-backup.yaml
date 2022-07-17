@@ -149,3 +149,7 @@ spec:
           - ip: 192.168.0.50
             hostnames: ['boss']
           restartPolicy: Never
+          nodeName: ubx
+          hostNetwork: true
+          hostPID: true
+          hostIPC: true
