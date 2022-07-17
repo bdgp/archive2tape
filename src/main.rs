@@ -639,7 +639,7 @@ impl Options {
     }
 
     fn unmount_tape(&self) -> Result<()> {
-        debug!("Running unmount_tape");
+        info!("Unmounting current tape");
         if self.is_mounted()? {
             debug!("Running fusermount command");
             if self.root {
@@ -670,6 +670,7 @@ impl Options {
             
             self.unmount_tape()?;
             debug!("Running unload command");
+            info!("Moving tape {:#?} from drive to empty slot {}", drive_slot.label, empty_slot.index);
             if self.root {
                 cmd!(&self.su_exec,"root:root" ,&self.mtx, "-f", &self.loader, "unload", empty_slot.index.to_string(), drive_slot.index.to_string()).run()?;
             }
@@ -678,6 +679,7 @@ impl Options {
             }
         }
         debug!("Running load commmand");
+        info!("Moving tape {:#?} from slot {} to drive", slot.label, slot.index);
         if self.root {
             cmd!(&self.su_exec,"root:root" ,&self.mtx, "-f", &self.loader, "load", slot.to_string(), drive_slot.index.to_string()).run()?;
         }
@@ -689,7 +691,7 @@ impl Options {
     }
 
     fn mount_tape(&self) -> Result<()> {
-        debug!("Running mount_tape");
+        info!("Mounting current tape");
         if ! self.is_mounted()? {
             debug!("Running ltfs commmand");
 
@@ -713,7 +715,7 @@ impl Options {
     }
 
     fn format_ltfs(&self) -> Result<()> {
-        debug!("Running mkltfs commmand");
+        info!("Running mkltfs commmand");
         if self.is_mounted()? {
             Err(eyre!("Can't format mounted tape, please unmount first"))?
         }
