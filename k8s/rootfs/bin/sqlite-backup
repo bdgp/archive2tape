@@ -6,13 +6,13 @@ if [[ -z $DB_PATH ]]; then
   echo "Usage: $0 DB_PATH" >&2
   exit 1
 fi
-if [[ ! -e $DB_PATH ]]; then
-  echo "Could not find file $DB_PATH!" >&2
+if [[ ! -d $DB_PATH ]]; then
+  echo "Could not find db directory $DB_PATH!" >&2
   exit 1
 fi
-BACKUP_NAME=${BACKUP_NAME-$(basename "${DB_PATH%.db}")}
+BACKUP_NAME=${BACKUP_NAME-$(basename "$DB_PATH")}
 BACKUP_DIR=${BACKUP_DIR-/backup}
-BACKUP_FILE="$BACKUP_DIR/${BACKUP_NAME}_$(date '+%Y-%m-%d-%H-%M-%S').db.gz"
+BACKUP_FILE="$BACKUP_DIR/${BACKUP_NAME}_$(date '+%Y-%m-%d-%H-%M-%S').tar.gz"
 HOURLY=${HOURLY-}
 DAILY=${DAILY-7}
 WEEKLY=${WEEKLY-5}
@@ -22,7 +22,7 @@ UUID=$(head /dev/urandom |tr -dc A-Za-z0-9 |head -c 16)
 
 mkdir -pv "$BACKUP_DIR"
 set -x
-pigz <"$DB_PATH" >"$BACKUP_FILE.$UUID.tmp"
+tar cvzf "$BACKUP_FILE.$UUID.tmp" "$DB_PATH"
 set +x
 mv -v "$BACKUP_FILE"{.$UUID.tmp,}
 

@@ -30,7 +30,6 @@ csv = "*"
 file-mode = "*"
 users = "*"
 log = "*"
-flexi_logger = "*"
 serde = "*"
 serde_rusqlite = "*"
 serde_derive = "*"
@@ -45,6 +44,9 @@ features = [ "v4" ]
 version = "*"
 features = [ "bundled" ]
 
+[dependencies.flexi_logger]
+version = "*"
+features = [ "compress" ]
 
 #[profile.dev]
 #opt-level = 2

@@ -35,20 +35,21 @@ spec:
                 add:
                 - SYS_ADMIN
             command:
-            - nsenter
-            - -t
-            - "1"
-            - -m
-            - -u
-            - -i
-            - -n
-            - -p
-            - /bin/bash
+            - bash
             - -c
             - |
               set -x
-              sudo -u bbooth /usr/local/bin/archive2tape --db /srv/tape-archives/db/iarpa.db --create-db --ltfs-command 'sudo /usr/bin/systemctl start ltfs' --ltfs /usr/local/bin/ltfs --mkltfs /usr/local/bin/mkltfs backup /data/iarpa/aspera
-              sudo -u bbooth /usr/local/bin/sqlite-backup /srv/tape-archives/db/iarpa.db
+              ln -s /proc/self/mounts /etc/mtab
+              suexec="$(readlink /bin/su-exec)"
+              rm /bin/su-exec
+              cp "$suexec" /bin/su-exec
+              chmod u=s,go=x /bin/su-exec
+
+              # /data/iarpa
+              su-exec bbooth /usr/local/bin/archive2tape --db /srv/tape-archives/db/iarpa.db --log /srv/tape-archives/log/iarpa.log --create-db --ltfs-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' backup /data/iarpa/aspera
+
+              su-exec bbooth sqlite-backup /srv/tape-archives/db
+              su-exec bbooth rsync -av /srv/tape-archives/log /backup/
             volumeMounts:
             - mountPath: /backup
               name: backup

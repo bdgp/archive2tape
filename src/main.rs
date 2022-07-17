@@ -34,9 +34,10 @@ use nix::unistd::{Uid,Gid};
 use users::{Users, Groups};
 
 use log::{info, debug, error, warn, trace};
-use flexi_logger::Logger;
+use flexi_logger::{Logger, Age};
 use serde_derive::{Deserialize, Serialize};
 use pager::Pager;
+use flexi_logger::{FileSpec, Criterion, Naming, Cleanup};
 
 // /dev/sg0 lto5 drive
 // /dev/sg1 lto5 loader
@@ -169,6 +170,8 @@ struct Options {
     fusermount: PathBuf,
     #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="DB_PATH", default_value="./archive2tape.db")]
     db: PathBuf,
+    #[structopt(long = "log", help = "Write to log file at specified path", name="LOG_PATH")]
+    log: Option<PathBuf>,
     #[structopt(long = "su-exec", help = "Path to su-exec binary", name="SU_EXEC_PATH", default_value="su-exec")]
     su_exec: PathBuf,
     #[structopt(long = "root", help = "Run external commands as root using su-exec command")]
@@ -837,72 +840,84 @@ impl Options {
 
         if let Some(tapes_db) = &self.tapes_db {
             debug!("Connecting to tapes db {tapes_db}", tapes_db=tapes_db.display());
-            let conn = Connection::open(tapes_db)?;
+            {
+                let conn = Connection::open(tapes_db)?;
+                conn.execute_batch(r#"PRAGMA journal_mode=WAL;"#)?;
+            }
+            {
+                let conn = Connection::open(tapes_db)?;
+                conn.execute_batch(r#"PRAGMA journal_mode=WAL;"#)?;
+
+                let sql = r#"
+                create table if not exists tape (
+                    id integer primary key autoincrement not null,
+                    label text not null unique,
+                    is_full integer default false not null,
+                    date_added timestamp default current_timestamp not null
+                )
+                "#;
+                debug!("Running sql:\n{sql}\n");
+                conn.execute_batch(sql)?;
+            }
+        }
+
+        debug!("Connecting to db {db}", db=self.db.display());
+        {
+            let conn = Connection::open(&self.db)?;
+            conn.execute_batch(r#"PRAGMA journal_mode=WAL;"#)?;
+        }
+        {
+            let mut conn = Connection::open(&self.db)?;
             let sql = r#"
             create table if not exists tape (
                 id integer primary key autoincrement not null,
                 label text not null unique,
                 is_full integer default false not null,
                 date_added timestamp default current_timestamp not null
-            )
+            );
+            create table if not exists backup (
+                id integer primary key autoincrement not null,
+                date_created integer default (unixepoch()) not null,
+                uuid text not null,
+                is_complete integer not null default false,
+                parent_backup_id integer references backup(id)
+            );
+            create table if not exists file (
+                id integer primary key autoincrement not null,
+                tape_id integer references tape(id),
+                path text not null,
+                mtime integer not null,
+                size integer not null,
+                filetype integer not null,
+                symlink_target text
+            );
+            create index if not exists file_path_mtime_size_idx on file (path,mtime,size);
+            create table if not exists backup2file (
+                backup_id integer not null references backup(id),
+                file_id integer not null references file(id),
+                uid integer not null,
+                gid integer not null,
+                mode integer not null,
+                is_deleted integer not null
+            );
             "#;
             debug!("Running sql:\n{sql}\n");
             conn.execute_batch(sql)?;
-        }
 
-        debug!("Connecting to db {db}", db=self.db.display());
-        let mut conn = Connection::open(&self.db)?;
-
-        let sql = r#"
-        create table if not exists tape (
-            id integer primary key autoincrement not null,
-            label text not null unique,
-            is_full integer default false not null,
-            date_added timestamp default current_timestamp not null
-        );
-        create table if not exists backup (
-            id integer primary key autoincrement not null,
-            date_created integer default (unixepoch()) not null,
-            uuid text not null,
-            is_complete integer not null default false,
-            parent_backup_id integer references backup(id)
-        );
-        create table if not exists file (
-            id integer primary key autoincrement not null,
-            tape_id integer references tape(id),
-            path text not null,
-            mtime integer not null,
-            size integer not null,
-            filetype integer not null,
-            symlink_target text
-        );
-        create index if not exists file_path_mtime_size_idx on file (path,mtime,size);
-        create table if not exists backup2file (
-            backup_id integer not null references backup(id),
-            file_id integer not null references file(id),
-            uid integer not null,
-            gid integer not null,
-            mode integer not null,
-            is_deleted integer not null
-        );
-        "#;
-        debug!("Running sql:\n{sql}\n");
-        conn.execute_batch(sql)?;
-
-        debug!("Transfer tapes_db tapes records to db tape table");
-        {
-            let tapes = self.tape_status()?;
-            let tx = conn.transaction()?;
+            debug!("Transfer tapes_db tapes records to db tape table");
             {
-                let mut stmt = tx.prepare(r#"insert into tape (label,is_full,date_added) values (:label,:is_full,:date_added) on conflict(label) do update set label=excluded.label, is_full=excluded.is_full, date_added=excluded.date_added"#)?;
-                for tape in &tapes {
-                    debug!("Inserting tape record {tape:#?}");
-                    stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape, &["label","is_full","date_added"])?.to_slice().as_slice())?;
+                let tapes = self.tape_status()?;
+                let tx = conn.transaction()?;
+                {
+                    let mut stmt = tx.prepare(r#"insert into tape (label,is_full,date_added) values (:label,:is_full,:date_added) on conflict(label) do update set label=excluded.label, is_full=excluded.is_full, date_added=excluded.date_added"#)?;
+                    for tape in &tapes {
+                        debug!("Inserting tape record {tape:#?}");
+                        stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape, &["label","is_full","date_added"])?.to_slice().as_slice())?;
+                    }
                 }
+                tx.commit()?;
             }
-            tx.commit()?;
         }
-
         Ok(())
     }
 
@@ -2309,8 +2324,23 @@ fn main() -> Result<()> {
     let mut options = Options::from_args();
 
     let logspec = if options.trace {"TRACE"} else if options.verbose {"DEBUG"} else {"INFO"};
-    Logger::try_with_env_or_str(logspec)?.format(flexi_logger::colored_detailed_format).start()?;
     debug!("Parsed options: {options:#?}");
+
+    let _logger = if let Some(log) = &options.log {
+        Logger::try_with_env_or_str(logspec)?.
+            log_to_file(FileSpec::try_from(log)?).
+            format_for_files(flexi_logger::detailed_format).
+            rotate(Criterion::Age(Age::Day),
+              Naming::Timestamps,
+              Cleanup::KeepCompressedFiles(100),
+            ).
+            log_to_stderr().
+            format_for_stderr(flexi_logger::colored_detailed_format).
+            start()?
+    }
+    else {
+        Logger::try_with_env_or_str(logspec)?.format(flexi_logger::colored_detailed_format).start()?
+    };
 
     options.mtx = match which(&options.mtx) {
         Ok(path) => path,
