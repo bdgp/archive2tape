@@ -1,0 +1,146 @@
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: tape-db-backup
+  namespace: db-backup
+spec:
+  concurrencyPolicy: Forbid
+           # ┌───────────── minute (0 - 59)
+           # │ ┌───────────── hour (0 - 23)
+           # │ │ ┌───────────── day of the month (1 - 31)
+           # │ │ │ ┌───────────── month (1 - 12)
+           # │ │ │ │ ┌───────────── day of the week (0 - 6) (Sunday to Saturday;
+           # * * * * *
+  schedule: '0 0 * * *'
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - nodeSelectorTerms:
+                  matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                    - ubx
+          containers:
+          - image: "fiji.lbl.gov/bdgp/archive2tape"
+            name: db-backup
+            imagePullPolicy: Always
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -x
+	      ln -s /proc/self/mounts /etc/mtab
+              suexec="$(readlink /bin/su-exec)"
+              rm /bin/su-exec
+              cp "$suexec" /bin/su-exec
+              chmod u=s,go=x /bin/su-exec
+	      su-exec bbooth archive2tape --db /home/bbooth/src/tape-archives/db/iarpa.db --root backup /data/iarpa
+	      su-exec bbooth sqlite-backup /home/bbooth/src/tape-archives/db/iarpa.db
+            volumeMounts:
+            - mountPath: /backup
+              name: backup
+            - mountPath: /data
+              mountPropagation: HostToContainer
+              name: data
+            - mountPath: /users
+              mountPropagation: HostToContainer
+              name: users
+            - mountPath: /www
+              mountPropagation: HostToContainer
+              name: www
+            - mountPath: /mnt
+              mountPropagation: HostToContainer
+              name: mnt
+            - mountPath: /persistent
+              mountPropagation: HostToContainer
+              name: persistent
+            - mountPath: /databrown
+              mountPropagation: HostToContainer
+              name: databrown
+            - mountPath: /karpendata
+              mountPropagation: HostToContainer
+              name: karpendata
+            - mountPath: /karpensecondary
+              mountPropagation: HostToContainer
+              name: karpensecondary
+            - mountPath: /home
+              mountPropagation: HostToContainer
+              name: home
+            - mountPath: /dev/fuse
+              mountPropagation: HostToContainer
+              name: fuse
+            - mountPath: /dev/tape
+              mountPropagation: HostToContainer
+              name: tape
+            - mountPath: /media
+              mountPropagation: Bidirectional
+              name: media
+            - mountPath: /var/run/nscd
+              mountPropagation: HostToContainer
+              name: nscd
+          volumes:
+          - nfs:
+              server: boss
+              path: /volume1/db-backup/tape-archives
+            name: backup
+          - hostPath:
+              path: /data
+              type: ""
+            name: data
+          - hostPath:
+              path: /users
+              type: ""
+            name: users
+          - hostPath:
+              path: /www
+              type: ""
+            name: www
+          - hostPath:
+              path: /mnt
+              type: ""
+            name: mnt
+          - hostPath:
+              path: /persistent
+              type: ""
+            name: persistent
+          - hostPath:
+              path: /databrown
+              type: ""
+            name: databrown
+          - hostPath:
+              path: /karpendata
+              type: ""
+            name: karpendata
+          - hostPath:
+              path: /karpensecondary
+              type: ""
+            name: karpensecondary
+          - hostPath:
+              path: /home
+              type: ""
+            name: home
+          - hostPath:
+              path: /dev/fuse
+              type: ""
+            name: fuse
+          - hostPath:
+              path: /dev/tape
+              type: ""
+            name: tape
+          - hostPath:
+              path: /media
+              type: ""
+            name: media
+          - hostPath:
+              path: /var/run/nscd
+              type: ""
+            name: nscd
+          hostAliases:
+          - ip: 192.168.0.50
+            hostnames: ['boss']
+          restartPolicy: Never

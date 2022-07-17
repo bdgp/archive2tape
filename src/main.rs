@@ -829,8 +829,23 @@ impl Options {
             self.tapes_db = Some(tapes_db);
         }
 
+        if let Some(tapes_db) = &self.tapes_db {
+            debug!("Connecting to tapes db {tapes_db}", tapes_db=tapes_db.display());
+            let conn = Connection::open(tapes_db)?;
+            let sql = r#"
+            create table if not exists tape (
+                id integer primary key autoincrement not null,
+                label text not null unique,
+                is_full integer default false not null,
+                date_added timestamp default current_timestamp not null
+            )
+            "#;
+            debug!("Running sql:\n{sql}\n");
+            conn.execute_batch(sql)?;
+        }
+
         debug!("Connecting to db {db}", db=self.db.display());
-        let conn = Connection::open(&self.db)?;
+        let mut conn = Connection::open(&self.db)?;
 
         let sql = r#"
         create table if not exists tape (
@@ -868,19 +883,18 @@ impl Options {
         debug!("Running sql:\n{sql}\n");
         conn.execute_batch(sql)?;
 
-        if let Some(tapes_db) = &self.tapes_db {
-            debug!("Connecting to tapes db {tapes_db}", tapes_db=tapes_db.display());
-            let conn = Connection::open(tapes_db)?;
-            let sql = r#"
-            create table if not exists tape (
-                id integer primary key autoincrement not null,
-                label text not null unique,
-                is_full integer default false not null,
-                date_added timestamp default current_timestamp not null
-            )
-            "#;
-            debug!("Running sql:\n{sql}\n");
-            conn.execute_batch(sql)?;
+        debug!("Transfer tapes_db tapes records to db tape table");
+        {
+            let tapes = self.tape_status()?;
+            let tx = conn.transaction()?;
+            {
+                let mut stmt = tx.prepare(r#"insert into tape (label,is_full,date_added) values (:label,:is_full,:date_added) on conflict(label,is_full,date_added) do update set label=excluded.label, is_full=excluded.is_full, date_added=excluded.date_added"#)?;
+                for tape in &tapes {
+                    debug!("Inserting tape record {tape:#?}");
+                    stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape, &["label","is_full","date_added"])?.to_slice().as_slice())?;
+                }
+            }
+            tx.commit()?;
         }
 
         Ok(())

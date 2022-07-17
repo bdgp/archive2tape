@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -eu -o pipefail
+shopt -s nullglob
+DB_PATH=${1-}
+if [[ -z $DBPATH ]]; then
+  echo "Usage: $0 DBPATH" >&2
+  exit 1
+fi
+BACKUP_NAME=${BACKUP_NAME-$(basename "${DB_PATH%.db}")}
+BACKUP_DIR=${BACKUP_DIR-/backup}
+BACKUP_FILE="$BACKUP_DIR/${BACKUP_NAME}_$(date '+%Y-%m-%d-%H-%M-%S').db.gz"
+HOURLY=${HOURLY-}
+DAILY=${DAILY-7}
+WEEKLY=${WEEKLY-5}
+MONTHLY=${MONTHLY-12}
+YEARLY=${YEARLY-}
+UUID=$(head /dev/urandom |tr -dc A-Za-z0-9 |head -c 16)
+
+mkdir -pv "$BACKUP_DIR"
+set -x
+pigz < >"$BACKUP_FILE.$UUID.tmp"
+set +x
+mv -v "$BACKUP_FILE"{.$UUID.tmp,}
+
+rotate-backups \
+  $([[ -n "$HOURLY" ]] && echo "--hourly=$HOURLY") \
+  $([[ -n "$DAILY" ]] && echo "--daily=$DAILY") \
+  $([[ -n "$WEEKLY" ]] && echo "--weekly=$WEEKLY") \
+  $([[ -n "$MONTHLY" ]] && echo "--monthly=$MONTHLY") \
+  $([[ -n "$YEARLY" ]] && echo "--yearly=$YEARLY") \
+  --include="${BACKUP_NAME}_*.db.gz" \
+  --prefer-recent --relaxed --verbose \
+  "$BACKUP_DIR"
+
