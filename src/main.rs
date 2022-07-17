@@ -656,6 +656,9 @@ impl Options {
     fn load_tape(&self, slot: usize) -> Result<()> {
         debug!("Running load_tape");
         let ls = self.loader_status()?;
+        let se = ls.iter().
+            filter(|se| se.index==slot).
+            next().ok_or(eyre!("Could not find storage element for slot {slot}!"))?;
         let drive_slot = ls.iter().
             filter(|se| se.storage_type==StorageType::Drive).
             next().ok_or(eyre!("Could not find drive slot"))?;
@@ -679,7 +682,7 @@ impl Options {
             }
         }
         debug!("Running load commmand");
-        info!("Moving tape {:#?} from slot {} to drive", slot.label, slot.index);
+        info!("Moving tape {:#?} from slot {} to drive", se.label, slot);
         if self.root {
             cmd!(&self.su_exec,"root:root" ,&self.mtx, "-f", &self.loader, "load", slot.to_string(), drive_slot.index.to_string()).run()?;
         }
