@@ -38,6 +38,7 @@ spec:
             - bash
             - -c
             - |
+              set -eu -o pipefail
               set -x
               ln -s /proc/self/mounts /etc/mtab
               suexec="$(readlink /bin/su-exec)"
@@ -46,7 +47,7 @@ spec:
               chmod u=s,go=x /bin/su-exec
 
               # /data/iarpa
-              su-exec bbooth /usr/local/bin/archive2tape --db /srv/tape-archives/db/iarpa.db --log /srv/tape-archives/log/iarpa.log --create-db --ltfs-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' backup /data/iarpa/aspera
+              su-exec bbooth archive2tape --db /srv/tape-archives/db/iarpa.db --log /srv/tape-archives/log/iarpa.log --create-db --ltfs-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' backup /data/iarpa/aspera
 
               su-exec bbooth sqlite-backup /srv/tape-archives/db
               su-exec bbooth rsync -av /srv/tape-archives/log /backup/

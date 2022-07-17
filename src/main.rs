@@ -37,7 +37,7 @@ use log::{info, debug, error, warn, trace};
 use flexi_logger::{Logger, Age};
 use serde_derive::{Deserialize, Serialize};
 use pager::Pager;
-use flexi_logger::{FileSpec, Criterion, Naming, Cleanup};
+use flexi_logger::{FileSpec, Criterion, Naming, Cleanup, Duplicate};
 
 // /dev/sg0 lto5 drive
 // /dev/sg1 lto5 loader
@@ -2334,7 +2334,7 @@ fn main() -> Result<()> {
               Naming::Timestamps,
               Cleanup::KeepCompressedFiles(100),
             ).
-            log_to_stderr().
+            duplicate_to_stderr(if options.trace {Duplicate::Trace} else if options.verbose {Duplicate::Debug} else {Duplicate::Info}).
             format_for_stderr(flexi_logger::colored_detailed_format).
             start()?
     }
