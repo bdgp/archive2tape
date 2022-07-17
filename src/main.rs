@@ -161,6 +161,8 @@ struct Options {
     mt: PathBuf,
     #[structopt(long = "ltfs", help = "Path to ltfs command", name="LTFS_PATH", default_value="ltfs")]
     ltfs: PathBuf,
+    #[structopt(long = "ltfs-command", help = "Use a custom shell command to mount the ltfs filesystem", name="LTFS_COMMAND")]
+    ltfs_command: Option<String>,
     #[structopt(long = "mkltfs", help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="mkltfs")]
     mkltfs: PathBuf,
     #[structopt(long = "fusermount", help = "Path to fusermount command", name="FUSERMOUNT_PATH", default_value="fusermount")]
@@ -687,7 +689,11 @@ impl Options {
         debug!("Running mount_tape");
         if ! self.is_mounted()? {
             debug!("Running ltfs commmand");
-            if self.root {
+
+            if let Some(ltfs_command) = &self.ltfs_command {
+                cmd!("/bin/sh","-c",ltfs_command).run()?;
+            }
+            else if self.root {
                 cmd!(&self.su_exec,"root:root", &self.ltfs, "-o", format!("devname={drive}", drive=self.ltfs_drive.to_string_lossy()), &self.ltfs_path).run()?;
             }
             else {

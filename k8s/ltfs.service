@@ -1,0 +1,11 @@
+[Unit]
+Description=Start ltfs filesystem
+
+[Service]
+Type=forking
+User=bbooth
+ExecStart=/usr/local/bin/ltfs -o devname=/dev/sg2 /media/lto8
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
