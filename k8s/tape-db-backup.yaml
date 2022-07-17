@@ -47,8 +47,8 @@ spec:
             - -c
             - |
               set -x
-              sudo -u bbooth /usr/local/bin/archive2tape --db /srv/tape-archives/db/iarpa.db --create-db --ltfs-command 'sudo systemctl start ltfs' backup /data/iarpa/aspera
-              sudo -u bbooth /usr/local/bin/sqlite-backup /home/bbooth/src/tape-archives/db/iarpa.db
+              sudo -u bbooth /usr/local/bin/archive2tape --db /srv/tape-archives/db/iarpa.db --create-db --ltfs-command 'sudo /usr/bin/systemctl start ltfs' --ltfs /usr/local/bin/ltfs --mkltfs /usr/local/bin/mkltfs backup /data/iarpa/aspera
+              sudo -u bbooth /usr/local/bin/sqlite-backup /srv/tape-archives/db/iarpa.db
             volumeMounts:
             - mountPath: /backup
               name: backup

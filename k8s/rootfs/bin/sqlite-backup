@@ -26,7 +26,7 @@ pigz <"$DB_PATH" >"$BACKUP_FILE.$UUID.tmp"
 set +x
 mv -v "$BACKUP_FILE"{.$UUID.tmp,}
 
-rotate-backups \
+PATH=$PATH:/usr/local/bin rotate-backups \
   $([[ -n "$HOURLY" ]] && echo "--hourly=$HOURLY") \
   $([[ -n "$DAILY" ]] && echo "--daily=$DAILY") \
   $([[ -n "$WEEKLY" ]] && echo "--weekly=$WEEKLY") \
