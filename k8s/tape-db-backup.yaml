@@ -77,9 +77,9 @@ spec:
             - mountPath: /karpensecondary
               mountPropagation: HostToContainer
               name: karpensecondary
-            - mountPath: /home
+            - mountPath: /srv
               mountPropagation: HostToContainer
-              name: home
+              name: srv
             - mountPath: /dev/fuse
               mountPropagation: HostToContainer
               name: fuse
@@ -130,9 +130,9 @@ spec:
               type: ""
             name: karpensecondary
           - hostPath:
-              path: /home
+              path: /srv
               type: ""
-            name: home
+            name: srv
           - hostPath:
               path: /dev/fuse
               type: ""

@@ -3,6 +3,8 @@ set -eux -o pipefail
 dr=${DOCKER_REGISTRY:-fiji.lbl.gov/bdgp}
 img=${DOCKER_IMAGE:-archive2tape}
 
+#(cd .. && nix run github:cargo2nix/cargo2nix)
+
 (cd .. && nix build -o k8s/result)
 
 #./result/archive2tape-image |docker load && docker push "$dr/$img"
