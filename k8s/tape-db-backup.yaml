@@ -19,8 +19,8 @@ spec:
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
-              - nodeSelectorTerms:
-                  matchExpressions:
+                nodeSelectorTerms:
+                - matchExpressions:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
@@ -29,18 +29,23 @@ spec:
           - image: "fiji.lbl.gov/bdgp/archive2tape"
             name: db-backup
             imagePullPolicy: Always
+            securityContext:
+              privileged: true
+              capabilities:
+                add:
+                - SYS_ADMIN
             command:
             - /bin/bash
             - -c
             - |
               set -x
-	      ln -s /proc/self/mounts /etc/mtab
+              ln -s /proc/self/mounts /etc/mtab
               suexec="$(readlink /bin/su-exec)"
               rm /bin/su-exec
               cp "$suexec" /bin/su-exec
               chmod u=s,go=x /bin/su-exec
-	      su-exec bbooth archive2tape --db /home/bbooth/src/tape-archives/db/iarpa.db --root backup /data/iarpa
-	      su-exec bbooth sqlite-backup /home/bbooth/src/tape-archives/db/iarpa.db
+              su-exec bbooth archive2tape --db /home/bbooth/src/tape-archives/db/iarpa.db --create-db --root backup /data/iarpa/aspera
+              su-exec bbooth sqlite-backup /home/bbooth/src/tape-archives/db/iarpa.db
             volumeMounts:
             - mountPath: /backup
               name: backup
