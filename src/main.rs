@@ -1065,7 +1065,7 @@ impl Options {
                                                         match std::fs::read_link(&path) {
                                                         Ok(t) => Some(t),
                                                         Err(e) => {
-                                                            error!("Could not read symlink target of {}, skipping", path.to_string_lossy());
+                                                            error!("Could not read symlink target of {}, skipping: {e}", path.to_string_lossy());
                                                             continue;
                                                         },
                                                     }} else {None};
