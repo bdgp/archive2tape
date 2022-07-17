@@ -167,7 +167,7 @@ struct Options {
     fusermount: PathBuf,
     #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="DB_PATH", default_value="./archive2tape.db")]
     db: PathBuf,
-    #[structopt(long = "su-exc", help = "Path to su-exec binary", name="SU_EXEC_PATH", default_value="su-exec")]
+    #[structopt(long = "su-exec", help = "Path to su-exec binary", name="SU_EXEC_PATH", default_value="su-exec")]
     su_exec: PathBuf,
     #[structopt(long = "root", help = "Run external commands as root using su-exec command")]
     root: bool,
