@@ -888,7 +888,7 @@ impl Options {
             let tapes = self.tape_status()?;
             let tx = conn.transaction()?;
             {
-                let mut stmt = tx.prepare(r#"insert into tape (label,is_full,date_added) values (:label,:is_full,:date_added) on conflict(label,is_full,date_added) do update set label=excluded.label, is_full=excluded.is_full, date_added=excluded.date_added"#)?;
+                let mut stmt = tx.prepare(r#"insert into tape (label,is_full,date_added) values (:label,:is_full,:date_added) on conflict(label) do update set label=excluded.label, is_full=excluded.is_full, date_added=excluded.date_added"#)?;
                 for tape in &tapes {
                     debug!("Inserting tape record {tape:#?}");
                     stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape, &["label","is_full","date_added"])?.to_slice().as_slice())?;
