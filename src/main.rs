@@ -1083,7 +1083,7 @@ impl Options {
                                                     trace!("Inserting new_file record: {new_file:#?}");
                                                     stmt.execute(serde_rusqlite::to_params_named_with_fields(&new_file, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
                                                     count += 1;
-                                                    if count % 10000 == 0 {
+                                                    if count % 1_000_000 == 0 {
                                                         info!("Scanned {count} files for backup");
                                                     }
                                                 },
