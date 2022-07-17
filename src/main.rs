@@ -1061,6 +1061,14 @@ impl Options {
                                             //debug!("Found file to backup: {path}", path=path.to_string_lossy());
                                             match &entry.metadata() {
                                                 Ok(attr) => {
+                                                    let symlink_target = if path.is_symlink() {
+                                                        match std::fs::read_link(&path) {
+                                                        Ok(t) => Some(t),
+                                                        Err(e) => {
+                                                            error!("Could not read symlink target of {}, skipping", path.to_string_lossy());
+                                                            continue;
+                                                        },
+                                                    }} else {None};
                                                     let new_file = &NewFile {
                                                         id: 0,
                                                         path: PathBuf::from(path),
@@ -1070,7 +1078,7 @@ impl Options {
                                                         gid: attr.gid(),
                                                         mode: attr.mode(),
                                                         filetype: if path.is_symlink() {FileType::Symlink} else if path.is_dir() {FileType::Directory} else {FileType::File},
-                                                        symlink_target: if path.is_symlink() {Some(std::fs::read_link(&path)?)} else {None},
+                                                        symlink_target: symlink_target,
                                                     };
                                                     trace!("Inserting new_file record: {new_file:#?}");
                                                     stmt.execute(serde_rusqlite::to_params_named_with_fields(&new_file, &["path","mtime","size","uid","gid","mode","filetype","symlink_target"])?.to_slice().as_slice())?;
@@ -1485,7 +1493,8 @@ impl Options {
                                         continue;
                                     }
                                     else {
-                                        Err(e)?
+                                        error!("File {} could not be copied, skipping!: {e}", file.path.to_string_lossy());
+                                        continue;
                                     }
                                 }
                                 // set the file's mtime
