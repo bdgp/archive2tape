@@ -2299,30 +2299,7 @@ impl Options {
     }
 }
 
-fn main() -> Result<()> {
-    std::env::set_var("RUST_BACKTRACE", "full");
-    color_eyre::install()?;
-
-    let mut options = Options::from_args();
-
-    let logspec = if options.trace {"TRACE"} else if options.verbose {"DEBUG"} else {"INFO"};
-    debug!("Parsed options: {options:#?}");
-
-    let _logger = if let Some(log) = &options.log {
-        Logger::try_with_env_or_str(logspec)?.
-            log_to_file(FileSpec::try_from(log)?).
-            format_for_files(flexi_logger::detailed_format).
-            rotate(Criterion::Age(Age::Day),
-              Naming::Timestamps,
-              Cleanup::KeepCompressedFiles(100),
-            ).
-            duplicate_to_stderr(if options.trace {Duplicate::Trace} else if options.verbose {Duplicate::Debug} else {Duplicate::Info}).
-            format_for_stderr(flexi_logger::colored_detailed_format).
-            start()?
-    }
-    else {
-        Logger::try_with_env_or_str(logspec)?.format(flexi_logger::colored_detailed_format).start()?
-    };
+fn run(options: &mut Options) -> Result<()> {
 
     options.mtx = match which(&options.mtx) {
         Ok(path) => path,
@@ -2381,3 +2358,36 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+fn main() -> Result<()> {
+    std::env::set_var("RUST_BACKTRACE", "full");
+    color_eyre::install()?;
+
+    let mut options = Options::from_args();
+
+    let logspec = if options.trace {"TRACE"} else if options.verbose {"DEBUG"} else {"INFO"};
+    debug!("Parsed options: {options:#?}");
+
+    let _logger = if let Some(log) = &options.log {
+        Logger::try_with_env_or_str(logspec)?.
+            log_to_file(FileSpec::try_from(log)?).
+            format_for_files(flexi_logger::detailed_format).
+            rotate(Criterion::Age(Age::Day),
+              Naming::Timestamps,
+              Cleanup::KeepCompressedFiles(100),
+            ).
+            duplicate_to_stderr(if options.trace {Duplicate::Trace} else if options.verbose {Duplicate::Debug} else {Duplicate::Info}).
+            format_for_stderr(flexi_logger::colored_detailed_format).
+            start()?
+    }
+    else {
+        Logger::try_with_env_or_str(logspec)?.format(flexi_logger::colored_detailed_format).start()?
+    };
+
+    if let Err(err) = run(&mut options) {
+        error!("{err:?}");
+        Err(err)?;
+    }
+    Ok(())
+}
+
