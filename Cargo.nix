@@ -126,6 +126,7 @@ in
       lazy_static = rustPackages."registry+https://github.com/rust-lang/crates.io-index".lazy_static."1.4.0" { inherit profileName; };
       linked_hash_map = rustPackages."registry+https://github.com/rust-lang/crates.io-index".linked-hash-map."0.5.6" { inherit profileName; };
       log = rustPackages."registry+https://github.com/rust-lang/crates.io-index".log."0.4.17" { inherit profileName; };
+      log_panics = rustPackages."registry+https://github.com/rust-lang/crates.io-index".log-panics."2.1.0" { inherit profileName; };
       nix = rustPackages."registry+https://github.com/rust-lang/crates.io-index".nix."0.24.1" { inherit profileName; };
       num_enum = rustPackages."registry+https://github.com/rust-lang/crates.io-index".num_enum."0.5.7" { inherit profileName; };
       pager = rustPackages."registry+https://github.com/rust-lang/crates.io-index".pager."0.16.0" { inherit profileName; };
@@ -803,6 +804,21 @@ in
     ];
     dependencies = {
       cfg_if = rustPackages."registry+https://github.com/rust-lang/crates.io-index".cfg-if."1.0.0" { inherit profileName; };
+    };
+  });
+  
+  "registry+https://github.com/rust-lang/crates.io-index".log-panics."2.1.0" = overridableMkRustCrate (profileName: rec {
+    name = "log-panics";
+    version = "2.1.0";
+    registry = "registry+https://github.com/rust-lang/crates.io-index";
+    src = fetchCratesIo { inherit name version; sha256 = "68f9dd8546191c1850ecf67d22f5ff00a935b890d0e84713159a55495cc2ac5f"; };
+    features = builtins.concatLists [
+      [ "backtrace" ]
+      [ "with-backtrace" ]
+    ];
+    dependencies = {
+      backtrace = rustPackages."registry+https://github.com/rust-lang/crates.io-index".backtrace."0.3.66" { inherit profileName; };
+      log = rustPackages."registry+https://github.com/rust-lang/crates.io-index".log."0.4.17" { inherit profileName; };
     };
   });
   

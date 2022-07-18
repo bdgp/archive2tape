@@ -48,6 +48,11 @@ features = [ "bundled" ]
 version = "*"
 features = [ "compress" ]
 
+[dependencies.log-panics]
+version = "*"
+features = [ "with-backtrace" ]
+
+
 #[profile.dev]
 #opt-level = 2
 

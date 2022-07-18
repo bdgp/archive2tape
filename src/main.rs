@@ -2384,6 +2384,8 @@ fn main() -> Result<()> {
         Logger::try_with_env_or_str(logspec)?.format(flexi_logger::colored_detailed_format).start()?
     };
 
+    log_panics::init();
+
     if let Err(err) = run(&mut options) {
         error!("{err:?}");
         Err(err)?;
