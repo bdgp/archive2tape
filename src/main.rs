@@ -959,22 +959,6 @@ impl Options {
         }
         debug!("got parent backup id {parent_backup_id:#?}");
 
-        // create the new backup record
-        let mut backup = None;
-        let backup_uuid = Uuid::new_v4();
-        if ! backup_cmd.dry_run {
-            let sql = r#"insert into backup (uuid,parent_backup_id) values (?1,?2) returning *"#;
-            debug!("Running query: {sql}");
-            let mut stmt = conn.prepare(sql)?;
-            let rows = stmt.query(params![backup_uuid.to_string(), parent_backup_id])?;
-            let mut rows_iter = serde_rusqlite::from_rows::<Backup>(rows);
-            if let Some(backup_record) = rows_iter.next() {
-                let backup_record = backup_record?;
-                backup = Some(backup_record);
-            }
-        }
-        debug!("Created backup record: {backup:#?}");
-
         let mut to_copy = LinkedList::<NewFile>::new();
 
         // compute the backup diffs
@@ -1245,6 +1229,27 @@ impl Options {
             tx.rollback()?;
         }
         debug!("Found {} backup_diff records, {} to_copy records", backup_diffs.len(), to_copy.len());
+
+        if backup_diffs.is_empty() && to_copy.is_empty() {
+            info!("No files have changed since last backup. Exiting program.");
+            return Ok(())
+        }
+
+        // create the new backup record
+        let mut backup = None;
+        let backup_uuid = Uuid::new_v4();
+        if ! backup_cmd.dry_run {
+            let sql = r#"insert into backup (uuid,parent_backup_id) values (?1,?2) returning *"#;
+            debug!("Running query: {sql}");
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query(params![backup_uuid.to_string(), parent_backup_id])?;
+            let mut rows_iter = serde_rusqlite::from_rows::<Backup>(rows);
+            if let Some(backup_record) = rows_iter.next() {
+                let backup_record = backup_record?;
+                backup = Some(backup_record);
+            }
+        }
+        debug!("Created backup record: {backup:#?}");
 
         if ! backup_cmd.dry_run {
             let backup_id = if let Some(backup) = &backup {Some(backup.id)} else {None};
