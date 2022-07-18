@@ -1051,6 +1051,7 @@ impl Options {
                         }
                     }
                 }
+                info!("Scanned {count} total files for backup");
             }
             {
                 // get the complete list of backup diffs from the db

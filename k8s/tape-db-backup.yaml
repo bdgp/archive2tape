@@ -93,6 +93,8 @@ spec:
             - mountPath: /var/run/nscd
               mountPropagation: HostToContainer
               name: nscd
+            - mountPath: /tmp
+              name: tmp
           volumes:
           - nfs:
               server: boss
@@ -150,6 +152,10 @@ spec:
               path: /var/run/nscd
               type: ""
             name: nscd
+          - hostPath:
+              path: /srv/tape-archives/tmp
+              type: ""
+            name: tmp
           hostAliases:
           - ip: 192.168.0.50
             hostnames: ['boss']
