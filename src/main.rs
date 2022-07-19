@@ -1186,7 +1186,7 @@ impl Options {
                                         }
 
                                         // get file metadata
-                                        let metadata = match std::fs::metadata(&path) {
+                                        let metadata = match std::fs::symlink_metadata(&path) {
                                             Ok(m) => m,
                                             Err(e) => {
                                                 warn!("Could not extract metadata for file {}, skipping: {e}", path.to_string_lossy());
@@ -1463,20 +1463,6 @@ impl Options {
                                             }
                                             tx.commit()?;
                                             count += 1;
-                                        }
-                                        // check if we need to set old_dir's mtime
-                                        if ! backup_cmd.dry_run {
-                                            while let Some((old_dir, mtime)) = old_dir.pop() {
-                                                let mtime = FileTime::from_unix_time(mtime, 0);
-                                                if let Err(e) = filetime::set_file_times(&old_dir, mtime.clone(), mtime.clone()) {
-                                                    if self.is_tape_full()? {
-                                                        tape_full = true;
-                                                    }
-                                                    else {
-                                                        Err(e)?
-                                                    }
-                                                }
-                                            }
                                         }
                                     }
                                 }
