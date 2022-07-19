@@ -950,11 +950,17 @@ impl Options {
             let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query(params![parent_backup_id])?;
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
+            let mut idxcount = 0u64;
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
                 trace!("Handling full_backup record: {full_backup:#?}");
                 backup_index.insert((full_backup.path.clone(), full_backup.mtime, full_backup.size, full_backup.filetype as u8, full_backup.symlink_target.clone()), full_backup);
+                idxcount += 1;
+                if idxcount % 1_000_000 == 0 {
+                    info!("Loading index with {idxcount} records...");
+                }
             }
+            info!("Loaded index with {idxcount} records.");
         }
         info!("Built index with {} records", backup_index.len());
 
