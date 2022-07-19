@@ -855,7 +855,7 @@ impl Options {
                 filetype integer not null,
                 symlink_target text
             );
-            create index if not exists file_path_mtime_size_idx on file (path,mtime,size);
+            create index if not exists file_path_mtime_size_idx on file (path,mtime,size,filetype);
             create table if not exists backup2file (
                 backup_id integer not null references backup(id),
                 file_id integer not null references file(id),
@@ -957,10 +957,9 @@ impl Options {
                 backup_index.insert((full_backup.path.clone(), full_backup.mtime, full_backup.size, full_backup.filetype as u8, full_backup.symlink_target.clone()), full_backup);
                 idxcount += 1;
                 if idxcount % 1_000_000 == 0 {
-                    info!("Loading index with {idxcount} records...");
+                    info!("Building index with {idxcount} records...");
                 }
             }
-            info!("Loaded index with {idxcount} records.");
         }
         info!("Built index with {} records", backup_index.len());
 
