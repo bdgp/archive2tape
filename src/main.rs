@@ -131,12 +131,18 @@ struct LoadTapeCmd {
 }
 
 #[derive(StructOpt, Debug)]
+struct FormatLTFSCmd {
+    #[structopt(long = "force", help = "Format tape even if it's alrady formatted?")]
+    force: bool,
+}
+
+#[derive(StructOpt, Debug)]
 enum Command {
     Backup(BackupCmd),
     Restore(RestoreCmd),
     ListBackups(ListBackupsCmd),
     ListFiles(ListFilesCmd),
-    FormatLTFS,
+    FormatLTFS(FormatLTFSCmd),
     IsMounted,
     IsTapeFull,
     LoaderStatus,
@@ -683,10 +689,21 @@ impl Options {
 
     fn format_ltfs(&self) -> Result<()> {
         info!("Running mkltfs commmand");
+        let format_cmd = match &self.cmd {
+            Some(Command::FormatLTFS(b)) => b,
+            _ => Err(eyre!("Couldn't match backup subcommand!"))?,
+        };
+
         if self.is_mounted()? {
             Err(eyre!("Can't format mounted tape, please unmount first"))?
         }
-        let output = cmd!(&self.mkltfs, "-d", &self.ltfs_drive).unchecked().run()?;
+
+        let output = if format_cmd.force {
+            cmd!(&self.mkltfs, "-d", &self.ltfs_drive,"-f").unchecked().run()?
+        }
+        else {
+            cmd!(&self.mkltfs, "-d", &self.ltfs_drive).unchecked().run()?
+        };
         match output.status.code() {
             Some(16) => {
                 debug!("mkltfs returned exit code 16, already formatted");
@@ -898,6 +915,9 @@ impl Options {
         debug!("Connecting to db {db}", db=self.db.display());
         let mut conn = Connection::open(&self.db)?;
 
+        // make sure a non-full tape is loaded, and create any missing tape db records
+        let mut tape = Some(self.ready_storage()?);
+
         // get the tape db records
         let mut tapes = LinkedHashMap::<String,Tape>::new();
         for tape in self.tape_status()? {
@@ -905,10 +925,15 @@ impl Options {
         }
         debug!("got tapes records: {tapes:#?}");
 
-        let mut tape = Some(self.ready_storage()?);
-        let tape_record = if let Some(tape) = &tape {
+        // get the tape db record for the current tape
+        let mut tape_record = if let Some(tape) = &tape {
             if let Some(label) = &tape.label {tapes.get(label).map(|t| t.clone())} else {None}
         } else {None};
+        debug!("tape={tape:#?}, tape_record={tape_record:#?}");
+
+        if ! backup_cmd.dry_run && tape_record.is_none() {
+            Err(eyre!("Tape record is None {tape_record:#?}!, tape={tape:#?}"))?
+        }
 
         // get the parent backup ID
         let mut parent_backup_id = Option::<i64>::None;
@@ -1045,15 +1070,7 @@ impl Options {
                                                 debug!("Running sql: {sql}");
                                                 let mut stmt = tx.prepare(sql)?;
                                                 let backup_id = backup.id;
-                                                let label = if let Some(tape) = &tape {
-                                                    if let Some(label) = &tape.label 
-                                                        {Some(label)} else {None}
-                                                    } 
-                                                    else {None}
-                                                    .ok_or_else(|| eyre!("No label found for tape!"))?;
-                                                debug!("label={tape:#?}");
-                                                let tape_record = tapes.get(label).ok_or_else(|| eyre!("No tape record found for {label}"))?;
-                                                debug!("tape_record={tape:#?}");
+                                                let tape_record = &tape_record.ok_or_else(|| eyre!("no tape record!"))?;
                                                 let rows = stmt.query(params![backup_id, tape_record.id])?;
                                                 let mut rows_iter = serde_rusqlite::from_rows::<NewFile>(rows);
                                                 let mut recopy = Vec::<PathBuf>::new();
@@ -1143,11 +1160,21 @@ impl Options {
 
                                             // load the new tape
                                             tape = Some(self.ready_storage()?);
+
+                                            // update the tape record
+                                            let label = if let Some(tape) = &tape {
+                                                if let Some(label) = &tape.label 
+                                                    {Some(label)} else {None}
+                                                } 
+                                                else {None}
+                                                .ok_or_else(|| eyre!("No label found for tape!"))?;
+                                            debug!("label={tape:#?}");
+                                            tape_record = tapes.get(label).map(|t| t.clone());
                                         }
 
                                         // ignore any entries that are not one of: directory, file, symlink
                                         if !path.is_dir() && !path.is_file() && !path.is_symlink() {
-                                            continue;
+                                            continue 'PATHS;
                                         }
                                         // check include filters
                                         if !backup_cmd.include_regex.is_empty() {
@@ -1159,7 +1186,7 @@ impl Options {
                                                 }
                                             }
                                             if !to_include {
-                                                continue;
+                                                continue 'PATHS;
                                             }
                                         }
                                         if !backup_cmd.include.is_empty() {
@@ -1171,21 +1198,21 @@ impl Options {
                                                 }
                                             }
                                             if !to_include {
-                                                continue;
+                                                continue 'PATHS;
                                             }
                                         }
                                         // check exclude filters
                                         if !backup_cmd.exclude_regex.is_empty() {
                                             for e in &backup_cmd.exclude_regex {
                                                 if e.is_match(path.as_os_str().as_bytes()) {
-                                                    continue;
+                                                    continue 'PATHS;
                                                 }
                                             }
                                         }
                                         if !backup_cmd.exclude.is_empty() {
                                             for e in &backup_cmd.exclude {
                                                 if e.matches_path(&path) {
-                                                    continue;
+                                                    continue 'PATHS;
                                                 }
                                             }
                                         }
@@ -1195,7 +1222,7 @@ impl Options {
                                             Ok(m) => m,
                                             Err(e) => {
                                                 warn!("Could not extract metadata for file {}, skipping: {e}", path.to_string_lossy());
-                                                continue;
+                                                continue 'PATHS;
                                             }
                                         };
                                         let filetype = if path.is_symlink() {FileType::Symlink} else if path.is_dir() {FileType::Directory} else {FileType::File};
@@ -1206,7 +1233,7 @@ impl Options {
                                                 Ok(t) => Some(t),
                                                 Err(e) => {
                                                     warn!("Could not read target of symlink {}: {e}", path.to_string_lossy());
-                                                    continue;
+                                                    continue 'PATHS;
                                                 },
                                             }
                                         }
@@ -1216,12 +1243,13 @@ impl Options {
                                         if let Some(parent_record) = backup_index.remove(&(path.clone(), metadata.mtime(), metadata.size(), filetype as u8, target.clone())) {
                                             if parent_record.uid == metadata.uid() && parent_record.gid == metadata.gid() && parent_record.mode == metadata.mode() {
                                                 trace!("Skipping file {}, already backed up", path.to_string_lossy());
-                                                continue;
+                                                continue 'PATHS;
                                             }
                                             // add file and backup2file records to the database
                                             if let Some(backup) = &backup {
                                                 let tx = conn.transaction()?;
                                                 {
+                                                    trace!("Updating metadata for {}", path.to_string_lossy());
                                                     let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
                                                     b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
                                                         backup_id: backup.id,
@@ -1235,7 +1263,7 @@ impl Options {
                                                 tx.commit()?;
                                             }
                                             count += 1;
-                                            continue;
+                                            continue 'PATHS;
                                         }
 
                                         trace!("Handling file {path}", path=path.to_string_lossy());
@@ -1245,7 +1273,7 @@ impl Options {
                                             Some(n) => n,
                                             None => {
                                                 warn!("Could not parse file name of file {}", path.to_string_lossy());
-                                                continue;
+                                                continue 'PATHS;
                                             },
                                         };
 
@@ -1260,7 +1288,7 @@ impl Options {
                                             if self.is_tape_full()? {
                                                 tape_full = true;
                                                 paths.push(path);
-                                                continue;
+                                                continue 'PATHS;
                                             }
                                             else {
                                                 Err(e)?
@@ -1313,7 +1341,7 @@ impl Options {
                                                         if self.is_tape_full()? {
                                                             tape_full = true;
                                                             paths.push(path);
-                                                            break;
+                                                            continue 'PATHS;
                                                         }
                                                         else {
                                                             Err(e)?
@@ -1341,7 +1369,7 @@ impl Options {
                                                             if self.is_tape_full()? {
                                                                 tape_full = true;
                                                                 paths.push(path);
-                                                                break;
+                                                                continue 'PATHS;
                                                             }
                                                             else {
                                                                 Err(e)?
@@ -1354,7 +1382,7 @@ impl Options {
                                                             if self.is_tape_full()? {
                                                                 tape_full = true;
                                                                 paths.push(path);
-                                                                break;
+                                                                continue 'PATHS;
                                                             }
                                                             else {
                                                                 Err(e)?
@@ -1398,15 +1426,15 @@ impl Options {
                                                         if self.is_tape_full()? {
                                                             tape_full = true;
                                                             paths.push(path);
-                                                            break;
+                                                            continue 'PATHS;
                                                         }
                                                         else if !path.exists() {
                                                             error!("File {} no longer exists, skipping backup!", path.to_string_lossy());
-                                                            continue;
+                                                            continue 'PATHS;
                                                         }
                                                         else {
                                                             error!("File {} could not be copied, skipping!: {e}", path.to_string_lossy());
-                                                            continue;
+                                                            continue 'PATHS;
                                                         }
                                                     }
                                                     // set the file's mtime
@@ -1416,7 +1444,7 @@ impl Options {
                                                         if self.is_tape_full()? {
                                                             tape_full = true;
                                                             paths.push(path);
-                                                            break;
+                                                            continue 'PATHS;
                                                         }
                                                         else {
                                                             Err(e)?
@@ -1428,7 +1456,7 @@ impl Options {
                                                         if self.is_tape_full()? {
                                                             tape_full = true;
                                                             paths.push(path);
-                                                            break;
+                                                            continue 'PATHS;
                                                         }
                                                         else {
                                                             Err(e)?
@@ -1438,13 +1466,12 @@ impl Options {
                                             },
                                         };
                                         // add file and backup2file records to the database
-                                        {
+                                        if ! backup_cmd.dry_run {
+                                            trace!("Adding file and backup2file records to database");
                                             let tx = conn.transaction()?;
                                             if let (Some(backup), Some(tape_record)) = (&backup, &tape_record) {
-                                                let mut file_stmt = tx.prepare(r#"insert into file (tape_id,path,mtime,size,filetype,symlink_target) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target) returning *"#)?;
-                                                let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
-                                                // write file and backup2file db records
-                                                let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(File{
+                                                let sql = r#"insert into file (tape_id,path,mtime,size,filetype,symlink_target) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target) returning *"#;
+                                                let file = File{
                                                     id: 0,
                                                     tape_id: tape_record.id,
                                                     path: path.clone(),
@@ -1452,21 +1479,35 @@ impl Options {
                                                     size: metadata.size(),
                                                     filetype: filetype,
                                                     symlink_target: target,
-                                                }, &["tape_id","path","mtime","size","filetype","symlink_target"])?.to_slice().as_slice())?;
+                                                };
+                                                trace!("Running sql:\n{sql}\nto insert file {file:#?}");
+                                                let mut file_stmt = tx.prepare(sql)?;
+                                                // write file and backup2file db records
+                                                let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(&file, &["tape_id","path","mtime","size","filetype","symlink_target"])?.to_slice().as_slice())?;
+
                                                 let mut rows_iter = serde_rusqlite::from_rows::<File>(rows);
                                                 if let Some(file_record) = rows_iter.next() {
                                                     let file_record = file_record?;
-                                                    b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
+                                                    trace!("query returned file record: {file_record:#?}");
+                                                    let backup2file = Backup2File {
                                                         backup_id: backup.id,
                                                         file_id: file_record.id,
                                                         uid: metadata.uid(),
                                                         gid: metadata.gid(),
                                                         mode: metadata.mode(),
                                                         is_deleted: false,
-                                                    })?.to_slice().as_slice())?;
+                                                    };
+                                                    let sql = r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#;
+                                                    trace!("Running sql:\n{sql}\nto insert back2file record: {backup2file:#?} ");
+                                                    let mut b2f_stmt = tx.prepare(sql)?;
+                                                    b2f_stmt.execute(serde_rusqlite::to_params_named(&backup2file)?.to_slice().as_slice())?;
                                                 }
                                             }
+                                            else {
+                                                Err(eyre!("backup record {backup:#?} and/or tape record {tape_record:#?} empty!"))?
+                                            }
                                             tx.commit()?;
+                                            trace!("Committed");
                                             count += 1;
                                         }
                                     }
@@ -2214,7 +2255,7 @@ fn run(options: &mut Options) -> Result<()> {
         Some(Command::Restore(_)) => options.restore_files()?,
         Some(Command::ListBackups(_)) => options.list_backups()?,
         Some(Command::ListFiles(_)) => options.list_files()?,
-        Some(Command::FormatLTFS) => info!("{:#?}", options.format_ltfs()),
+        Some(Command::FormatLTFS(_)) => info!("{:#?}", options.format_ltfs()),
         Some(Command::IsMounted) => info!("{:#?}", options.is_mounted()),
         Some(Command::IsTapeFull) => info!("{:#?}", options.is_tape_full()),
         Some(Command::LoaderStatus) => options.loader_status_view()?,
