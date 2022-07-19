@@ -60,6 +60,8 @@ struct BackupCmd {
     dry_run: bool,
     #[structopt(long = "tape-full-test", help = "Perform a test of the tape full handling routine at the end of this backup.")]
     tape_full_test: bool,
+    #[structopt(long = "full", help = "Force a full backup instead of an incremental backup")]
+    full: bool,
 }
 
 #[derive(StructOpt, Debug)]
@@ -903,18 +905,14 @@ impl Options {
         }
         debug!("got tapes records: {tapes:#?}");
 
-        let se = self.loader_status()?;
-        let mut tape = se.iter().   
-            filter(|se| se.storage_type==StorageType::Drive).
-            map(|se| se.clone()).
-            next();
+        let mut tape = Some(self.ready_storage()?);
         let tape_record = if let Some(tape) = &tape {
             if let Some(label) = &tape.label {tapes.get(label).map(|t| t.clone())} else {None}
         } else {None};
 
         // get the parent backup ID
         let mut parent_backup_id = Option::<i64>::None;
-        {
+        if ! backup_cmd.full {
             let sql = r#"select id from backup order by date_created desc nulls last limit 1"#;
             debug!("Running query: {sql}");
             let mut stmt = conn.prepare(sql)?;
@@ -1053,6 +1051,7 @@ impl Options {
                                                 debug!("tape_record={tape:#?}");
                                                 let rows = stmt.query(params![backup_id, tape_record.id])?;
                                                 let mut rows_iter = serde_rusqlite::from_rows::<NewFile>(rows);
+                                                let mut recopy = Vec::<PathBuf>::new();
                                                 while let Some(new_file) = rows_iter.next() {
                                                     let new_file = new_file?;
                                                     trace!("new_file={new_file:#?}");
@@ -1119,13 +1118,16 @@ impl Options {
                                                         trace!("Running sql delete:\n{sql}\n");
                                                         tx.execute(sql, params![new_file.id])?; 
                                                         deleted_count += 1;
+
+                                                        recopy.push(path);
                                                     }
                                                 }
+                                                // re-copy the files
+                                                recopy.extend(paths);
+                                                paths = recopy;
                                             }
                                             tx.commit()?;
                                             info!("Verification complete, removed {count} files from the database", count=deleted_count);
-
-                                            tape = Some(self.ready_storage()?);
 
                                             // update the tape db records
                                             tapes.clear();
@@ -1133,6 +1135,9 @@ impl Options {
                                                 tapes.insert(tape.label.clone(), tape);
                                             }
                                             debug!("updated tapes records: {tapes:#?}", tapes=tapes);
+
+                                            // load the new tape
+                                            tape = Some(self.ready_storage()?);
                                         }
 
                                         // ignore any entries that are not one of: directory, file, symlink
@@ -1243,6 +1248,7 @@ impl Options {
                                             &dest.as_path(), 
                                             &file_path_stripped,
                                         ].iter().collect::<PathBuf>().as_os_str().as_bytes()));
+
                                         // make sure dest path exists
                                         trace!("Create parent directories: {}", dest_path.to_string_lossy());
                                         if let Err(e) = std::fs::create_dir_all(&dest_path) {
@@ -1485,6 +1491,43 @@ impl Options {
                     },
                 }
             }
+        }
+
+        // check if we need to set old_dir's mtime
+        if ! backup_cmd.dry_run {
+            while let Some((old_dir, mtime)) = old_dir.pop() {
+                let mtime = FileTime::from_unix_time(mtime, 0);
+                if let Err(e) = filetime::set_file_times(&old_dir, mtime.clone(), mtime.clone()) {
+                    if self.is_tape_full()? {
+                        warn!("Could not set mtime on parent directories because tape became full!");
+                        break;
+                    }
+                    else {
+                        Err(e)?
+                    }
+                }
+            }
+        }
+
+        // add records for deleted files
+        for (_, full_backup) in &backup_index {
+            if let Some(backup) = &backup {
+                let tx = conn.transaction()?;
+                {
+                    trace!("Adding deleted record for file {}", full_backup.path.to_string_lossy());
+                    let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
+                    b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
+                        backup_id: backup.id,
+                        file_id: full_backup.file_id,
+                        uid: full_backup.uid,
+                        gid: full_backup.gid,
+                        mode: full_backup.mode,
+                        is_deleted: true,
+                    })?.to_slice().as_slice())?;
+                }
+                tx.commit()?;
+            }
+            count += 1;
         }
 
         if ! backup_cmd.dry_run {
