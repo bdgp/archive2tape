@@ -11,7 +11,7 @@ use regex::Regex;
 use glob::Pattern;
 
 use serde::{Serializer, Deserializer, Deserialize, de};
-use structopt::StructOpt;
+use clap::{Parser, Subcommand};
 use walkdir::WalkDir;
 use std::vec::Vec;
 
@@ -44,157 +44,173 @@ use flexi_logger::{FileSpec, Criterion, Naming, Cleanup, Duplicate};
 // /dev/sg2 lto8 drive
 // /dev/sg4 lto8 loader
 
-#[derive(StructOpt, Debug)]
+#[derive(Parser, Debug)]
+#[clap( about = "Perform a backup to tape")]
 struct BackupCmd {
-    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
+    #[clap(long, help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
     include: Vec<Pattern>,
-    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
+    #[clap(long, help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
     exclude: Vec<Pattern>,
-    #[structopt(long = "include-regex", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    #[clap(long, help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include_regex: Vec<regex::bytes::Regex>,
-    #[structopt(long = "exclude-regex", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    #[clap(long, help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
     exclude_regex: Vec<regex::bytes::Regex>,
-    #[structopt(help = "Glob patterns to match files in filesystem", name="GLOB_PATTERN")]
-    patterns: Vec<Pattern>,
-    #[structopt(long = "dry-run", help = "Do not actually backup any files, just show what files would be backed up")]
+    #[clap(long, help = "Do not actually backup any files, just show what files would be backed up")]
     dry_run: bool,
-    #[structopt(long = "tape-full-test", help = "Perform a test of the tape full handling routine at the end of this backup.")]
+    #[clap(long, help = "Perform a test of the tape full handling routine at the end of this backup.")]
     tape_full_test: bool,
-    #[structopt(long = "full", help = "Force a full backup instead of an incremental backup")]
+    #[clap(long, help = "Force a full backup instead of an incremental backup")]
     full: bool,
+    #[clap(help = "Glob patterns to match files in filesystem", name="GLOB_PATTERN")]
+    patterns: Vec<Pattern>,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Parser, Debug)]
+#[clap( about = "Perform a restore from a previous backup")]
 struct RestoreCmd {
-    #[structopt(long = "restore-path", help = "Restore path", name="RESTORE_PATH", default_value=".")]
+    #[clap(long, help = "Restore path", name="RESTORE_PATH", default_value=".")]
     restore_path: PathBuf,
-    #[structopt(long = "noclobber", help = "Do not ovewrite existing files during a restore")]
+    #[clap(long, help = "Do not ovewrite existing files during a restore")]
     noclobber: bool,
-    #[structopt(long = "backup-id", help = "Backup ID to use for restore (default is latest backup)", name="BACKUP_ID")]
+    #[clap(long, help = "Backup ID to use for restore (default is latest backup)", name="BACKUP_ID")]
     backup_id: Option<i64>,
-    #[structopt(long = "backup-uuid", help = "Backup UUID to use for restore (default is latest backup)", name="BACKUP_UUID")]
+    #[clap(long, help = "Backup UUID to use for restore (default is latest backup)", name="BACKUP_UUID")]
     backup_uuid: Option<String>,
-    #[structopt(long = "backup-date", help = "Backup date to use for restore (default is latest backup)", name="BACKUP_DATETIME")]
+    #[clap(long, help = "Backup date to use for restore (default is latest backup)", name="BACKUP_DATETIME")]
     backup_date: Option<String>,
-    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
+    #[clap(long, help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
     include: Vec<Pattern>,
-    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
+    #[clap(long, help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
     exclude: Vec<Pattern>,
-    #[structopt(long = "include-regex", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    #[clap(long, help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include_regex: Vec<regex::bytes::Regex>,
-    #[structopt(long = "exclude-regex", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    #[clap(long, help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
     exclude_regex: Vec<regex::bytes::Regex>,
-    #[structopt(help = "Glob patterns to filter restore files", name="PATTERN")]
-    patterns: Vec<Pattern>,
-    #[structopt(long = "dry-run", help = "Do not actually restore any files, just show what files would be restored")]
+    #[clap(long, help = "Do not actually restore any files, just show what files would be restored")]
     dry_run: bool,
-    #[structopt(long = "complete", help = "Only restore from complete backups")]
+    #[clap(long, help = "Only restore from complete backups")]
     complete: bool,
-}
-
-#[derive(StructOpt, Debug)]
-struct ListBackupsCmd { 
-    #[structopt(long = "backup-id", help = "Backup ID to search", name="BACKUP_ID")]
-    backup_id: Option<i64>,
-    #[structopt(long = "backup-uuid", help = "Backup UUID to search", name="BACKUP_UUID")]
-    backup_uuid: Option<String>,
-    #[structopt(long = "backup-date", help = "Backup date to search", name="BACKUP_DATETIME")]
-    backup_date: Option<String>,
-    #[structopt(long = "complete", help = "Only show complete backups")]
-    complete: bool,
-}
-
-#[derive(StructOpt, Debug)]
-struct ListFilesCmd {
-    #[structopt(long = "backup-id", help = "Backup ID to search", name="BACKUP_ID")]
-    backup_id: Option<i64>,
-    #[structopt(long = "backup-uuid", help = "Backup UUID to search", name="BACKUP_UUID")]
-    backup_uuid: Option<String>,
-    #[structopt(long = "backup-date", help = "Backup date to search", name="BACKUP_DATETIME")]
-    backup_date: Option<String>,
-    #[structopt(long = "include", help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
-    include: Vec<Pattern>,
-    #[structopt(long = "exclude", help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
-    exclude: Vec<Pattern>,
-    #[structopt(long = "include-regex", help = "Regex patterns to include files", name="INCLUDE_REGEX")]
-    include_regex: Vec<regex::bytes::Regex>,
-    #[structopt(long = "exclude-regex", help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
-    exclude_regex: Vec<regex::bytes::Regex>,
-    #[structopt(help = "Glob patterns to filter search results", name="GLOB_PATTERN")]
+    #[clap(help = "Glob patterns to filter restore files", name="PATTERN")]
     patterns: Vec<Pattern>,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Parser, Debug)]
+#[clap( about = "List all backups in the sqlite database")]
+struct ListBackupsCmd { 
+    #[clap(long = "backup-id", help = "Backup ID to search", name="BACKUP_ID")]
+    backup_id: Option<i64>,
+    #[clap(long = "backup-uuid", help = "Backup UUID to search", name="BACKUP_UUID")]
+    backup_uuid: Option<String>,
+    #[clap(long = "backup-date", help = "Backup date to search", name="BACKUP_DATETIME")]
+    backup_date: Option<String>,
+    #[clap(long = "complete", help = "Only show complete backups")]
+    complete: bool,
+}
+
+#[derive(Parser, Debug)]
+#[clap( about = "List files in a given backup")]
+struct ListFilesCmd {
+    #[clap(long, help = "Backup ID to search", name="BACKUP_ID")]
+    backup_id: Option<i64>,
+    #[clap(long, help = "Backup UUID to search", name="BACKUP_UUID")]
+    backup_uuid: Option<String>,
+    #[clap(long, help = "Backup date to search", name="BACKUP_DATETIME")]
+    backup_date: Option<String>,
+    #[clap(long, help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
+    include: Vec<Pattern>,
+    #[clap(long, help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
+    exclude: Vec<Pattern>,
+    #[clap(long, help = "Regex patterns to include files", name="INCLUDE_REGEX")]
+    include_regex: Vec<regex::bytes::Regex>,
+    #[clap(long, help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
+    exclude_regex: Vec<regex::bytes::Regex>,
+    #[clap(help = "Glob patterns to filter search results", name="GLOB_PATTERN")]
+    patterns: Vec<Pattern>,
+}
+
+#[derive(Parser, Debug)]
+#[clap( about = "Move a new tape into the drive")]
 struct LoadTapeCmd {
-    #[structopt(help = "Load a tape with a given slot number", name="SLOT_NUMBER")]
+    #[clap(help = "Load a tape with a given slot number", name="SLOT_NUMBER")]
     slot: usize,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Parser, Debug)]
+#[clap( about = "Format a tape using LTFS")]
 struct FormatLTFSCmd {
-    #[structopt(long = "force", help = "Format tape even if it's alrady formatted?")]
+    #[clap(long, help = "Format tape even if it's alrady formatted?")]
     force: bool,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 enum Command {
     Backup(BackupCmd),
     Restore(RestoreCmd),
     ListBackups(ListBackupsCmd),
     ListFiles(ListFilesCmd),
     FormatLTFS(FormatLTFSCmd),
+
+    #[clap( about = "Test if the LTFS filesystem is mounted")]
     IsMounted,
+    #[clap( about = "Test if the current tape is full")]
     IsTapeFull,
+    #[clap( about = "List all the tapes in the loader")]
     LoaderStatus,
     LoadTape(LoadTapeCmd),
+    #[clap( about = "Mount a tape using LTFS")]
     MountTape,
+    #[clap( about = "Find and load a tape that is ready for writing")]
     ReadyStorage,
+    #[clap( about = "Return the tape records from the sqlite database")]
     TapeStatus,
+    #[clap( about = "Unmount the LTFS volume")]
     UnmountTape,
+    #[clap( about = "Wait until the drive is ready")]
     WaitForDrive,
+    #[clap( about = "Wait until the ltfs process has terminated")]
     WaitForLTFSProcessToTerminate,
 }
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::UnifiedHelpMessage])]
+#[derive(Parser, Debug)]
+#[clap(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::UnifiedHelpMessage])]
 struct Options {
-    #[structopt(long = "drive", help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/st1")]
+    #[clap(long, help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/st1")]
     drive: PathBuf,
-    #[structopt(long = "ltfs-drive", help = "Path to tape drive device to use for ltfs", name="LTFS_DRIVE_DEVICE", default_value="/dev/sg2")]
+    #[clap(long, help = "Path to tape drive device to use for ltfs", name="LTFS_DRIVE_DEVICE", default_value="/dev/sg2")]
     ltfs_drive: PathBuf,
-    #[structopt(long = "loader", help = "Path to loader device", name="LOADER_DEVICE", default_value="/dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0")]
+    #[clap(long, help = "Path to loader device", name="LOADER_DEVICE", default_value="/dev/tape/by-id/scsi-1BDT_FlexStor_II_00DE64105985_LL0")]
     loader: PathBuf,
-    #[structopt(long = "mtx", help = "Path to mtx command (from mtx package)", name="MTX_PATH", default_value="mtx")]
+    #[clap(long, help = "Path to mtx command (from mtx package)", name="MTX_PATH", default_value="mtx")]
     mtx: PathBuf,
-    #[structopt(long = "mt", help = "Path to mt command (from cpio package)", name="MT_PATH", default_value="mt")]
+    #[clap(long, help = "Path to mt command (from cpio package)", name="MT_PATH", default_value="mt")]
     mt: PathBuf,
-    #[structopt(long = "ltfs", help = "Path to ltfs command", name="LTFS_PATH", default_value="ltfs")]
+    #[clap(long, help = "Path to ltfs command", name="LTFS_PATH", default_value="ltfs")]
     ltfs: PathBuf,
-    #[structopt(long = "ltfs-command", help = "Use a custom shell command to mount the ltfs filesystem", name="LTFS_COMMAND")]
+    #[clap(long, help = "Use a custom shell command to mount the ltfs filesystem", name="LTFS_COMMAND")]
     ltfs_command: Option<String>,
-    #[structopt(long = "mkltfs", help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="mkltfs")]
+    #[clap(long, help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="mkltfs")]
     mkltfs: PathBuf,
-    #[structopt(long = "fusermount", help = "Path to fusermount command", name="FUSERMOUNT_PATH", default_value="fusermount")]
+    #[clap(long, help = "Path to fusermount command", name="FUSERMOUNT_PATH", default_value="fusermount")]
     fusermount: PathBuf,
-    #[structopt(long = "db", help = "Path to SQLite backup metadata database", name="DB_PATH", default_value="./archive2tape.db")]
+    #[clap(long, help = "Path to SQLite backup metadata database", name="DB_PATH", default_value="./archive2tape.db")]
     db: PathBuf,
-    #[structopt(long = "log", help = "Write to log file at specified path", name="LOG_PATH")]
+    #[clap(long, help = "Write to log file at specified path", name="LOG_PATH")]
     log: Option<PathBuf>,
-    #[structopt(long = "tapes-db", help = "Path to SQLite tapes metadata database", name="TAPES_DB_PATH")]
+    #[clap(long, help = "Path to SQLite tapes metadata database", name="TAPES_DB_PATH")]
     tapes_db: Option<PathBuf>,
-    #[structopt(long = "create-db", help = "Create the metadata database if it doesn't exist")]
+    #[clap(long, help = "Create the metadata database if it doesn't exist")]
     create_db: bool,
-    #[structopt(long = "ltfs-path", help = "Mount path for LTFS filesystem", name="LTFS_MOUNT_PATH", default_value="/media/lto8")]
+    #[clap(long, help = "Mount path for LTFS filesystem", name="LTFS_MOUNT_PATH", default_value="/media/lto8")]
     ltfs_path: PathBuf,
-    #[structopt(long = "tape", help = "List of tapes to use for backup and restore. If none specified, use any tapes", name="TAPE_LABEL")]
+    #[clap(long, help = "List of tapes to use for backup and restore. If none specified, use any tapes", name="TAPE_LABEL")]
     tapes: Vec<String>,
-    #[structopt(long = "ignore-tape", help = "Regex patterns to ignore tapes with matching label", name="IGNORE_TAPE_REGEX", default_value="^CLN")]
+    #[clap(long, help = "Regex patterns to ignore tapes with matching label", name="IGNORE_TAPE_REGEX", default_value="^CLN")]
     ignore_tape: Regex,
-    #[structopt(long = "verbose", help = "Run in debug logging mode")]
+    #[clap(long, help = "Run in debug logging mode")]
     verbose: bool,
-    #[structopt(long = "trace", help = "Run in trace logging mode")]
+    #[clap(long, help = "Run in trace logging mode")]
     trace: bool,
-    #[structopt(subcommand)]
+    #[clap(subcommand)]
     cmd: Option<Command>,
 }
 

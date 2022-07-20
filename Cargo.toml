@@ -6,9 +6,6 @@ authors = ["Ben Booth <benwbooth@gmail.com>"]
 
 [dependencies]
 regex = "*"
-clap = "*"
-structopt = "*"
-structopt-derive = "*"
 duct = "*"
 stable-eyre = "*"
 color-eyre = "*"
@@ -35,6 +32,10 @@ serde_rusqlite = "*"
 serde_derive = "*"
 shell-escape = "*"
 pager = "*"
+
+[dependencies.clap]
+version = "*"
+features = [ "derive" ]
 
 [dependencies.uuid]
 version = "*"
