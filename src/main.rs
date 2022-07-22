@@ -712,16 +712,16 @@ impl Options {
 
     fn format_ltfs(&self) -> Result<()> {
         info!("Running mkltfs commmand");
-        let format_cmd = match &self.cmd {
-            Some(Command::FormatLTFS(b)) => b,
-            _ => Err(eyre!("Couldn't match backup subcommand!"))?,
+        let force = match &self.cmd {
+            Some(Command::FormatLTFS(b)) => b.force,
+            _ => false,
         };
 
         if self.is_mounted()? {
             Err(eyre!("Can't format mounted tape, please unmount first"))?
         }
 
-        let output = if format_cmd.force {
+        let output = if force {
             cmd!(&self.mkltfs, "-d", &self.ltfs_drive,"-f").unchecked().run()?
         }
         else {
