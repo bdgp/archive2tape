@@ -563,14 +563,30 @@ impl Options {
         debug!("Running insert_tape_record");
         if let Some(tapes_db) = &self.tapes_db {
             debug!("Loading tapes db {}", tapes_db.display());
-            let conn = Connection::open(tapes_db)?;
-            debug!("Inserting tape record {label}");
-            conn.execute(r#"insert into tape (label) values (?1) on conflict(label) do nothing "#, params![label])?;
+            let tapes_conn = Connection::open(tapes_db)?;
+            debug!("Inserting tape record {label} into tapes db");
+            let mut stmt = tapes_conn.prepare(r#"insert into tape (label) values (:label) on conflict(label) do nothing returning *"#)?;
+            let tape = Tape{
+                id: 0,
+                label: label.to_string(),
+                is_full: false,
+                date_added: "".to_string(),
+            };
+            let rows = stmt.query(serde_rusqlite::to_params_named_with_fields(&tape, &["label"])?.to_slice().as_slice())?;
+            let mut rows_iter = serde_rusqlite::from_rows::<Tape>(rows);
+            if let Some(tape_record) = rows_iter.next() {
+                let tape_record = tape_record?;
+                trace!("query returned tape record: {tape_record:#?}");
+
+                let conn = Connection::open(&self.db)?;
+                debug!("Inserting tape record {tape_record:#?} into metadata db");
+                let mut stmt = conn.prepare(r#"insert into tape (id,label,is_full,date_added) values (:id,:label,:is_full,:date_added) on conflict(label) do nothing"#)?;
+                stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape_record, &["id","label","is_full","date_added"])?.to_slice().as_slice())?;
+            }
         }
-        debug!("Loading metadata db {}", &self.db.display());
-        let conn = Connection::open(&self.db)?;
-        debug!("Inserting tape record {label}");
-        conn.execute(r#"insert into tape (label) values (?1) on conflict(label) do nothing"#, params![label])?;
+        else {
+            Err(eyre!("No tapes db given!"))?
+        }
         Ok(())
     }
 
@@ -913,10 +929,10 @@ impl Options {
                 let tapes = self.tape_status()?;
                 let tx = conn.transaction()?;
                 {
-                    let mut stmt = tx.prepare(r#"insert into tape (label,is_full,date_added) values (:label,:is_full,:date_added) on conflict(label) do update set label=excluded.label, is_full=excluded.is_full, date_added=excluded.date_added"#)?;
+                    let mut stmt = tx.prepare(r#"insert into tape (id,label,is_full,date_added) values (:id,:label,:is_full,:date_added) on conflict(label) do nothing"#)?;
                     for tape in &tapes {
                         debug!("Inserting tape record {tape:#?}");
-                        stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape, &["label","is_full","date_added"])?.to_slice().as_slice())?;
+                        stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape, &["id","label","is_full","date_added"])?.to_slice().as_slice())?;
                     }
                 }
                 tx.commit()?;
