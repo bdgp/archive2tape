@@ -186,8 +186,10 @@ struct Options {
     mt: PathBuf,
     #[clap(long, help = "Path to ltfs command", name="LTFS_PATH", default_value="ltfs")]
     ltfs: PathBuf,
-    #[clap(long, help = "Use a custom shell command to mount the ltfs filesystem", name="LTFS_COMMAND")]
-    ltfs_command: Option<String>,
+    #[clap(long, help = "Use a custom shell command to mount the ltfs filesystem", name="MOUNT_COMMAND")]
+    mount_command: Option<String>,
+    #[clap(long, help = "Use a custom shell command to unmount the ltfs filesystem", name="UNMOUNT_COMMAND")]
+    unmount_command: Option<String>,
     #[clap(long, help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="mkltfs")]
     mkltfs: PathBuf,
     #[clap(long, help = "Path to fusermount command", name="FUSERMOUNT_PATH", default_value="fusermount")]
@@ -645,8 +647,13 @@ impl Options {
     fn unmount_tape(&self) -> Result<()> {
         info!("Unmounting current tape");
         if self.is_mounted()? {
-            debug!("Running fusermount command");
-            cmd!(&self.fusermount, "-u", &self.ltfs_path).run()?;
+            if let Some(unmount_command) = &self.unmount_command {
+                cmd!("/bin/sh","-c",unmount_command).run()?;
+            }
+            else {
+                debug!("Running fusermount command");
+                cmd!(&self.fusermount, "-u", &self.ltfs_path).run()?;
+            }
             self.wait_for_ltfs_process_to_terminate()?;
         }
         Ok(())
@@ -687,8 +694,8 @@ impl Options {
         if ! self.is_mounted()? {
             debug!("Running ltfs commmand");
 
-            if let Some(ltfs_command) = &self.ltfs_command {
-                cmd!("/bin/sh","-c",ltfs_command).run()?;
+            if let Some(mount_command) = &self.mount_command {
+                cmd!("/bin/sh","-c",mount_command).run()?;
             }
             else {
                 cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.ltfs_drive.to_string_lossy()), &self.ltfs_path).run()?;
