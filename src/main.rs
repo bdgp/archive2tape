@@ -44,6 +44,8 @@ use flexi_logger::{FileSpec, Criterion, Naming, Cleanup, Duplicate};
 // /dev/sg2 lto8 drive
 // /dev/sg4 lto8 loader
 
+// TODO: recursive folder deletion records, copy checksums, tape tags
+
 #[derive(Parser, Debug)]
 #[clap( about = "Perform a backup to tape")]
 struct BackupCmd {
@@ -559,7 +561,7 @@ impl Options {
         Ok(tapes)
     }
 
-    fn insert_tape_record(&self, label: &str) -> Result<()> {
+    fn insert_tape_record(&self, label: &str) -> Result<Tape> {
         debug!("Running insert_tape_record");
         if let Some(tapes_db) = &self.tapes_db {
             debug!("Loading tapes db {}", tapes_db.display());
@@ -582,12 +584,13 @@ impl Options {
                 debug!("Inserting tape record {tape_record:#?} into metadata db");
                 let mut stmt = conn.prepare(r#"insert into tape (id,label,is_full,date_added) values (:id,:label,:is_full,:date_added) on conflict(label) do nothing"#)?;
                 stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape_record, &["id","label","is_full","date_added"])?.to_slice().as_slice())?;
+                return Ok(tape_record)
             }
         }
         else {
             Err(eyre!("No tapes db given!"))?
         }
-        Ok(())
+        Err(eyre!("Could not reeturn tape record!"))
     }
 
     fn set_tape_record_as_full(&self, label: &str) -> Result<()> {
@@ -1190,15 +1193,15 @@ impl Options {
                                             tx.commit()?;
                                             info!("Verification complete, removed {count} files from the database", count=deleted_count);
 
+                                            // load the new tape
+                                            tape = Some(self.ready_storage()?);
+
                                             // update the tape db records
                                             tapes.clear();
                                             for tape in self.tape_status()? {
                                                 tapes.insert(tape.label.clone(), tape);
                                             }
                                             debug!("updated tapes records: {tapes:#?}", tapes=tapes);
-
-                                            // load the new tape
-                                            tape = Some(self.ready_storage()?);
 
                                             // update the tape record
                                             let label = if let Some(tape) = &tape {
