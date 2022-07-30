@@ -1284,7 +1284,7 @@ impl Options {
                                         // if file exists in backup but metadata has changed, only insert a new backup2file record
                                         if let Some(parent_record) = backup_index.remove(&(path.clone(), metadata.mtime(), metadata.size(), filetype as u8, target.clone())) {
                                             if parent_record.uid == metadata.uid() && parent_record.gid == metadata.gid() && parent_record.mode == metadata.mode() {
-                                                trace!("Skipping file {}, already backed up", path.to_string_lossy());
+                                                //trace!("Skipping file {}, already backed up", path.to_string_lossy());
                                                 continue 'PATHS;
                                             }
                                             // add file and backup2file records to the database
