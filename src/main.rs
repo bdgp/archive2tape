@@ -2338,7 +2338,7 @@ fn main() -> Result<()> {
         Logger::try_with_env_or_str(logspec)?.
             log_to_file(FileSpec::try_from(log)?).
             format_for_files(flexi_logger::detailed_format).
-            rotate(Criterion::Age(Age::Day),
+            rotate(Criterion::Size(1_000_000_000),
               Naming::Timestamps,
               Cleanup::KeepCompressedFiles(100),
             ).
