@@ -1212,6 +1212,12 @@ impl Options {
                                                 .ok_or_else(|| eyre!("No label found for tape!"))?;
                                             debug!("label={tape:#?}");
                                             tape_record = tapes.get(label).map(|t| t.clone());
+
+                                            // reset the tape_full flag
+                                            tape_full = self.is_tape_full()?;
+                                            if tape_full {
+                                                Err(eyre!("Tape is full!"))?
+                                            }
                                         }
 
                                         // ignore any entries that are not one of: directory, file, symlink
