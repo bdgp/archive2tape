@@ -797,10 +797,10 @@ impl Options {
                     // if the tape is not marked as full
                     if ! full_tapes.contains(label) && ! self.ignore_tape.is_match(label) {
                         if tape.storage_type != StorageType::Drive {
-                            // if ltfs filesystem is not mounted
+                            // if ltfs filesystem is mounted
                             if self.is_mounted()? {
                                 debug!("Unmounting LTFS filesystem");
-                                // attempt to mount the tape
+                                // attempt to unmount the tape
                                 self.unmount_tape()?;
                             }
                             // load the tape into the drive
@@ -1020,7 +1020,7 @@ impl Options {
             let mut idxcount = 0u64;
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
-                trace!("Handling full_backup record: {full_backup:#?}");
+                //trace!("Handling full_backup record: {full_backup:#?}");
                 backup_index.insert((full_backup.path.clone(), full_backup.mtime, full_backup.size, full_backup.filetype as u8, full_backup.symlink_target.clone()), full_backup);
                 idxcount += 1;
                 if idxcount % 1_000_000 == 0 {
