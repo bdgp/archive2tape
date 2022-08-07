@@ -638,7 +638,7 @@ impl Options {
         debug!("Running wait_for_ltfs_process_to_terminate");
         let mut system = sysinfo::System::new();
         //for _ in 0..3600 {
-        while true {
+        loop {
             trace!("Refreshing processes");
             system.refresh_processes();
             let mut found_ltfs = false;
@@ -661,7 +661,7 @@ impl Options {
             debug!("Waiting 1 second...");
             std::thread::sleep(std::time::Duration::new(1, 0));
         }
-        Err(eyre!("ltfs process took too long to terminate"))?
+        //Err(eyre!("ltfs process took too long to terminate"))?
     }
 
     fn unmount_tape(&self) -> Result<()> {
@@ -958,8 +958,15 @@ impl Options {
         debug!("Connecting to db {db}", db=self.db.display());
         let mut conn = Connection::open(&self.db)?;
 
-        // make sure a non-full tape is loaded, and create any missing tape db records
-        let mut tape = Some(self.ready_storage()?);
+        let mut tape = if ! backup_cmd.tape_full_test {
+            // make sure a non-full tape is loaded, and create any missing tape db records
+            Some(self.ready_storage()?)
+        }
+        else {
+            // if --tape-full-test was passed, operate on the current tape 
+            // even if it's full
+            self.loader_status()?.iter().filter(|t| t.storage_type == StorageType::Drive && t.status == StorageStatus::Full).map(|t| t.clone()).next()
+        };
 
         // get the tape db records
         let mut tapes = LinkedHashMap::<String,Tape>::new();
