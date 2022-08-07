@@ -1752,7 +1752,7 @@ impl Options {
               and pb.depth <= pb2.depth
             group by 1,2,3,4,5,6,7,8,9,10,11,12
             having count(*)=1
-            order by f.tape_id, f.path
+            order by f.tape_id, f.id
             "#;
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(sql)?;
@@ -1957,6 +1957,20 @@ impl Options {
                                 trace!("tmp_file = {}", tmp_file.to_string_lossy());
 
                                 info!("{source} -> {dest}", source=source.to_string_lossy(), dest=dest.to_string_lossy());
+
+                                // check file size and checksums match
+                                let metadata = match std::fs::symlink_metadata(&source) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        Err(eyre!("Could not extract metadata for file {}, skipping: {e}", source.to_string_lossy()))?
+                                    }
+                                };
+                                if metadata.size() != full_backup.size {
+                                    Err(eyre!("Error: File {source} has size {msize} is different than database size {fbsize}", source=source.to_string_lossy(), msize=metadata.size(), fbsize=full_backup.size))?;
+                                }
+                                if metadata.mtime() != full_backup.mtime {
+                                    Err(eyre!("Error: File {source} has mtime {mmtime} is different than database size {fbmtime}", source=source.to_string_lossy(), mmtime=metadata.mtime(), fbmtime=full_backup.mtime))?;
+                                }
 
                                 if ! restore_cmd.dry_run {
                                     // make sure correct tape is loaded and mounted
