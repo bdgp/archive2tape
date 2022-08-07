@@ -34,7 +34,7 @@ use nix::unistd::{Uid,Gid};
 use users::{Users, Groups};
 
 use log::{info, debug, error, warn, trace};
-use flexi_logger::{Logger, Age};
+use flexi_logger::Logger;
 use serde_derive::{Deserialize, Serialize};
 use pager::Pager;
 use flexi_logger::{FileSpec, Criterion, Naming, Cleanup, Duplicate};
@@ -637,7 +637,8 @@ impl Options {
     fn wait_for_ltfs_process_to_terminate(&self) -> Result<()> {
         debug!("Running wait_for_ltfs_process_to_terminate");
         let mut system = sysinfo::System::new();
-        for _ in 0..600 {
+        //for _ in 0..3600 {
+        while true {
             trace!("Refreshing processes");
             system.refresh_processes();
             let mut found_ltfs = false;
