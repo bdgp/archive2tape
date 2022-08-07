@@ -6,7 +6,7 @@ Type=forking
 User=bbooth
 ExecStart=/usr/local/bin/ltfs -o devname=/dev/sg2 /media/lto8
 Restart=no
-TimeoutSec=infinity
+TimeoutSec=7200
 
 [Install]
 WantedBy=multi-user.target

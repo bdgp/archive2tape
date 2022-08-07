@@ -1073,6 +1073,7 @@ impl Options {
         let mut count = 0u64;
         let mut tape_full = self.is_tape_full()?;
         let mut old_dir = Vec::<(PathBuf, i64)>::new();
+        let mut tape_full_test = backup_cmd.tape_full_test;
         // use the glob patterns to produce a list of files
         for g in &backup_cmd.patterns {
             for entry in glob::glob(g.as_str())? {
@@ -1093,7 +1094,7 @@ impl Options {
                                         // were transferred successfully.
                                         // Any files that were not included in the last written ltfs index
                                         // partition will now be missing, and should be deleted from the database.
-                                        if ! backup_cmd.dry_run && (tape_full || backup_cmd.tape_full_test) {
+                                        if ! backup_cmd.dry_run && (tape_full || tape_full_test) {
                                             info!("The tape became full, re-mounting LTFS and verifying files");
                                             self.unmount_tape()?;
                                             self.mount_tape()?;
@@ -1219,6 +1220,7 @@ impl Options {
                                             if tape_full {
                                                 Err(eyre!("Tape is full!"))?
                                             }
+                                            tape_full_test = false;
                                         }
 
                                         // ignore any entries that are not one of: directory, file, symlink
