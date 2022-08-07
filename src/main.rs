@@ -1844,14 +1844,18 @@ impl Options {
                                 Err(_) => {
                                     trace!("set mtime of old_dir {od} to {mtime}", od=od.to_string_lossy());
                                     let filetime = FileTime::from_unix_time(*mtime, 0);
-                                    filetime::set_file_times(od, filetime.clone(), filetime.clone())?;
+                                    if ! restore_cmd.dry_run {
+                                        filetime::set_file_times(od, filetime.clone(), filetime.clone())?;
+                                    }
                                     old_dir.pop();
                                 },
                             }
                         }
                     }
                     trace!("create parent directories for {}", parent.to_string_lossy());
-                    std::fs::create_dir_all(parent)?;
+                    if ! restore_cmd.dry_run {
+                        std::fs::create_dir_all(parent)?;
+                    }
                 }
                 // transfer the file
                 trace!("Checking type of full_backup {full_backup:#?}");
@@ -1957,6 +1961,11 @@ impl Options {
                                 trace!("tmp_file = {}", tmp_file.to_string_lossy());
 
                                 info!("{source} -> {dest}", source=source.to_string_lossy(), dest=dest.to_string_lossy());
+
+                                // make sure the source file exists
+                                if ! source.exists() && source.is_file() {
+                                    Err(eyre!("Error: File {source} does not exist on tape!", source=source.to_string_lossy()))?;
+                                }
 
                                 // check file size and checksums match
                                 let metadata = match std::fs::symlink_metadata(&source) {
