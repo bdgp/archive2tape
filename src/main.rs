@@ -1,8 +1,8 @@
 #![cfg_attr(feature = "cargo-clippy", allow(cyclomatic_complexity, trivial_regex))]
 use std::os::unix::prelude::MetadataExt;
-use std::path::PathBuf;
+use std::path::{PathBuf};
 use std::io::{BufRead, BufReader};
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashSet};
 use std::os::unix::fs::PermissionsExt;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -44,7 +44,7 @@ use flexi_logger::{FileSpec, Criterion, Naming, Cleanup, Duplicate};
 // /dev/sg2 lto8 drive
 // /dev/sg4 lto8 loader
 
-// TODO: recursive folder deletion records, copy checksums, tape tags
+// TODO: copy checksums, tape tags
 
 #[derive(Parser, Debug)]
 #[clap( about = "Perform a backup to tape")]
@@ -384,6 +384,42 @@ macro_rules! cmd {
         }
     };
 }
+
+// fn copy_with_checksum(source: &Path, dest: &Path) -> Result<Vec<u8>> {
+//     let mut len = 0;
+//     let mut init = 0;
+//     let mut reader = std::fs::File::open(source)?;
+//     let mut writer = std::fs::File::create(dest)?;
+//     loop {
+//         let buf = writer.buffer_mut();
+//         let mut read_buf = ReadBuf::uninit(buf.spare_capacity_mut());
+//         // SAFETY: init is either 0 or the initialized_len of the previous iteration
+//         unsafe {
+//             read_buf.assume_init(init);
+//         }
+//         if read_buf.capacity() >= DEFAULT_BUF_SIZE {
+//             match reader.read_buf(&mut read_buf) {
+//                 Ok(()) => {
+//                     let bytes_read = read_buf.filled_len();
+//                     if bytes_read == 0 {
+//                         return Ok(len);
+//                     }
+//                     init = read_buf.initialized_len() - bytes_read;
+//                     // SAFETY: ReadBuf guarantees all of its filled bytes are init
+//                     unsafe { buf.set_len(buf.len() + bytes_read) };
+//                     len += bytes_read as u64;
+//                     // Read again if the buffer still has enough capacity, as BufWriter itself would do
+//                     // This will occur if the reader returns short reads
+//                     continue;
+//                 }
+//                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+//                 Err(e) => return Err(e),
+//             }
+//         }
+//         writer.flush_buf()?;
+//     }
+// }
+
 
 impl Options {
     // perl -ne '
@@ -1000,7 +1036,7 @@ impl Options {
 
         // build the full backup in-memory index
         info!("Building index");
-        let mut backup_index = HashMap::<(PathBuf, i64, u64, u8, Option<PathBuf>), FullBackup>::new();
+        let mut backup_index = LinkedHashMap::<(PathBuf, i64, u64, u8, Option<PathBuf>), FullBackup>::new();
         {
             let sql = r#"
                 with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
@@ -1019,7 +1055,7 @@ impl Options {
                 join file f
                     on b2f.file_id=f.id)
                 where not b2f.is_deleted
-                order by pb.depth desc
+                order by pb.depth desc, f.id
             "#;
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(sql)?;
@@ -1223,13 +1259,14 @@ impl Options {
 
                                             // reset the tape_full flag
                                             tape_full = self.is_tape_full()?;
-                                            if tape_full {
-                                                Err(eyre!("Tape is full!"))?
-                                            }
+
                                             // exit the backup command if this was a tape full test
                                             if backup_cmd.tape_full_test {
                                                 info!("Tape full test completed, exiting backup");
                                                 return Ok(());
+                                            }
+                                            if tape_full {
+                                                Err(eyre!("Tape is full!"))?
                                             }
                                         }
 
@@ -1603,10 +1640,18 @@ impl Options {
         }
 
         // add records for deleted files
-        for (_, full_backup) in &backup_index {
-            if let Some(backup) = &backup {
-                let tx = conn.transaction()?;
-                {
+        if let Some(backup) = &backup {
+            let tx = conn.transaction()?;
+            {
+                let mut last_path = Option::<PathBuf>::None;
+                for (_, full_backup) in &backup_index {
+                    if let Some(last_path) = &last_path {
+                        if full_backup.path.starts_with(last_path) {
+                            trace!("Path {path} is in already deleted directory {last_path}, not creating deletion record", path=full_backup.path.to_string_lossy(), last_path=last_path.to_string_lossy());
+                            continue;
+                        }
+                    }
+
                     trace!("Adding deleted record for file {}", full_backup.path.to_string_lossy());
                     let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
                     b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
@@ -1617,10 +1662,13 @@ impl Options {
                         mode: full_backup.mode,
                         is_deleted: true,
                     })?.to_slice().as_slice())?;
+                    count += 1;
+                    if full_backup.filetype == FileType::Directory {
+                        last_path = Some(full_backup.path.clone());
+                    }
                 }
-                tx.commit()?;
             }
-            count += 1;
+            tx.commit()?;
         }
 
         if ! backup_cmd.dry_run {
@@ -1760,9 +1808,25 @@ impl Options {
             let mut old_dir = Vec::<(PathBuf, i64)>::new();
             let rows = stmt.query([&backup.id])?;
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
+            let mut deleted_path = Option::<PathBuf>::None;
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
                 trace!("Handling full_backup record: {full_backup:#?}");
+
+                if let Some(deleted_path) = &deleted_path {
+                    if full_backup.path.starts_with(deleted_path) {
+                        trace!("Path {path} is in already deleted directory {deleted_path}, not restoring path", path=full_backup.path.to_string_lossy(), deleted_path=deleted_path.to_string_lossy());
+                        continue;
+                    }
+                }
+                if full_backup.is_deleted {
+                    if full_backup.filetype == FileType::Directory {
+                        deleted_path = Some(full_backup.path.clone());
+                    }
+                    trace!("Path {} is marked as deleted, skipping", full_backup.path.to_string_lossy());
+                    continue;
+                }
+
                 if ! restore_cmd.patterns.is_empty() {
                     let mut found_match = false;
                     for pattern in &restore_cmd.patterns {
@@ -2202,8 +2266,22 @@ impl Options {
             let rows = stmt.query([&backup.id])?;
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
             csv_writer.write_record(&["mode","owner","group","size","mtime","tape_label","path","symlink_target"])?;
+            let mut deleted_path = Option::<PathBuf>::None;
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
+
+                if let Some(deleted_path) = &deleted_path {
+                    if full_backup.path.starts_with(deleted_path) {
+                        continue;
+                    }
+                }
+                if full_backup.is_deleted {
+                    if full_backup.filetype == FileType::Directory {
+                        deleted_path = Some(full_backup.path.clone());
+                    }
+                    continue;
+                }
+
                 if ! list_files_cmd.patterns.is_empty() {
                     let mut found_match = false;
                     for pattern in &list_files_cmd.patterns {

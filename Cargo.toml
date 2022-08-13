@@ -32,6 +32,7 @@ serde_rusqlite = "*"
 serde_derive = "*"
 shell-escape = "*"
 pager = "*"
+sha2 = "*"
 
 [dependencies.clap]
 version = "*"
