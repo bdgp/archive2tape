@@ -1140,6 +1140,7 @@ impl Options {
                                             info!("The tape became full, re-mounting LTFS and verifying files");
                                             self.unmount_tape()?;
                                             self.mount_tape()?;
+                                            info!("Re-mounting tape completed, now verifying files on tape");
 
                                             let tx = conn.transaction()?;
                                             let mut deleted_count = 0u64;
@@ -1651,6 +1652,9 @@ impl Options {
                             continue;
                         }
                     }
+                    if full_backup.filetype == FileType::Directory {
+                        last_path = Some(full_backup.path.clone());
+                    }
 
                     trace!("Adding deleted record for file {}", full_backup.path.to_string_lossy());
                     let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
@@ -1663,9 +1667,6 @@ impl Options {
                         is_deleted: true,
                     })?.to_slice().as_slice())?;
                     count += 1;
-                    if full_backup.filetype == FileType::Directory {
-                        last_path = Some(full_backup.path.clone());
-                    }
                 }
             }
             tx.commit()?;
@@ -2259,7 +2260,7 @@ impl Options {
               and pb.depth <= pb2.depth
             group by 1,2,3,4,5,6,7,8,9,10,11,12
             having count(*)=1
-            order by f.path nulls last
+            order by f.id
             "#;
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(sql)?;
