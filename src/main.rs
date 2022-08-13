@@ -1036,7 +1036,7 @@ impl Options {
 
         // build the full backup in-memory index
         info!("Building index");
-        let mut backup_index = LinkedHashMap::<(PathBuf, i64, u64, u8, Option<PathBuf>), FullBackup>::new();
+        let mut backup_index = LinkedHashMap::<PathBuf, FullBackup>::new();
         {
             let sql = r#"
                 with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
@@ -1047,13 +1047,13 @@ impl Options {
                 select b.id, b.date_created, b.uuid, b.parent_backup_id, pb.depth+1 as depth
                 from backup b
                 join parent_backup pb 
-                    on pb.parent_backup_id = b.id) 
+                  on pb.parent_backup_id = b.id) 
                 select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target
                 from (parent_backup pb
                 join backup2file b2f
-                    on b2f.backup_id = pb.id
+                  on b2f.backup_id = pb.id
                 join file f
-                    on b2f.file_id=f.id)
+                  on b2f.file_id=f.id)
                 where not b2f.is_deleted
                 order by pb.depth desc, f.id
             "#;
@@ -1065,7 +1065,7 @@ impl Options {
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
                 //trace!("Handling full_backup record: {full_backup:#?}");
-                backup_index.insert((full_backup.path.clone(), full_backup.mtime, full_backup.size, full_backup.filetype as u8, full_backup.symlink_target.clone()), full_backup);
+                backup_index.insert(full_backup.path.clone(), full_backup);
                 idxcount += 1;
                 if idxcount % 1_000_000 == 0 {
                     info!("Building index with {idxcount} records...");
@@ -1339,30 +1339,34 @@ impl Options {
                                         else { None };
 
                                         // if file exists in backup but metadata has changed, only insert a new backup2file record
-                                        if let Some(parent_record) = backup_index.remove(&(path.clone(), metadata.mtime(), metadata.size(), filetype as u8, target.clone())) {
-                                            if parent_record.uid == metadata.uid() && parent_record.gid == metadata.gid() && parent_record.mode == metadata.mode() {
-                                                //trace!("Skipping file {}, already backed up", path.to_string_lossy());
+                                        //if let Some(parent_record) = backup_index.remove(&(path.clone(), metadata.mtime(), metadata.size(), filetype as u8, target.clone())) {
+                                        if let Some(parent_record) = backup_index.remove(&path) {
+                                            if metadata.mtime() == parent_record.mtime && metadata.size() == parent_record.size && filetype == parent_record.filetype && target == parent_record.symlink_target 
+                                            {
+                                                if parent_record.uid == metadata.uid() && parent_record.gid == metadata.gid() && parent_record.mode == metadata.mode() {
+                                                    //trace!("Skipping file {}, already backed up", path.to_string_lossy());
+                                                    continue 'PATHS;
+                                                }
+                                                // add file and backup2file records to the database
+                                                if let Some(backup) = &backup {
+                                                    let tx = conn.transaction()?;
+                                                    {
+                                                        trace!("Updating metadata for {}", path.to_string_lossy());
+                                                        let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
+                                                        b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
+                                                            backup_id: backup.id,
+                                                            file_id: parent_record.file_id,
+                                                            uid: metadata.uid(),
+                                                            gid: metadata.gid(),
+                                                            mode: metadata.mode(),
+                                                            is_deleted: false,
+                                                        })?.to_slice().as_slice())?;
+                                                    }
+                                                    tx.commit()?;
+                                                }
+                                                count += 1;
                                                 continue 'PATHS;
                                             }
-                                            // add file and backup2file records to the database
-                                            if let Some(backup) = &backup {
-                                                let tx = conn.transaction()?;
-                                                {
-                                                    trace!("Updating metadata for {}", path.to_string_lossy());
-                                                    let mut b2f_stmt = tx.prepare(r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#)?;
-                                                    b2f_stmt.execute(serde_rusqlite::to_params_named(&Backup2File {
-                                                        backup_id: backup.id,
-                                                        file_id: parent_record.file_id,
-                                                        uid: metadata.uid(),
-                                                        gid: metadata.gid(),
-                                                        mode: metadata.mode(),
-                                                        is_deleted: false,
-                                                    })?.to_slice().as_slice())?;
-                                                }
-                                                tx.commit()?;
-                                            }
-                                            count += 1;
-                                            continue 'PATHS;
                                         }
 
                                         trace!("Handling file {path}", path=path.to_string_lossy());
