@@ -1778,7 +1778,7 @@ impl Options {
 
             // get the complete list of backup records from the db
             let sql = r#"
-            with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
+              with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
               select id, date_created, uuid, parent_backup_id, 0 as depth
               from backup
               where id = ?1
@@ -1787,25 +1787,18 @@ impl Options {
               from backup b
               join parent_backup pb 
                 on pb.parent_backup_id = b.id) 
-            select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target
-            from (parent_backup pb
-              join backup2file b2f
-                on b2f.backup_id = pb.id
-              join file f
-                on b2f.file_id=f.id)
-            join (parent_backup pb2
-              join backup2file b2f2
-                on b2f2.backup_id=pb2.id
-              join file f2
-                on b2f2.file_id=f2.id)
-            on f.path=f2.path
-              and f.mtime=f2.mtime
-              and f.size=f2.size
-              and f.filetype=f2.filetype
-              and pb.depth <= pb2.depth
-            group by 1,2,3,4,5,6,7,8,9,10,11,12
-            having count(*)=1
-            order by f.tape_id, f.id
+              select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, path, mtime, size, filetype, symlink_target
+              from (
+                select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target, 
+                  f.id as file_id, pb.depth,
+                  row_number() over (partition by f.path order by pb.depth) as rank
+                from parent_backup pb
+                join backup2file b2f
+                  on b2f.backup_id = pb.id
+                join file f
+                  on b2f.file_id=f.id) s
+              where rank=1
+              order by file_id
             "#;
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(sql)?;
@@ -2237,7 +2230,7 @@ impl Options {
         if let Some(backup) = backup {
             debug!("Using backup record: {backup:#?}");
             let sql = r#"
-            with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
+              with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
               select id, date_created, uuid, parent_backup_id, 0 as depth
               from backup
               where id = ?1
@@ -2246,25 +2239,18 @@ impl Options {
               from backup b
               join parent_backup pb 
                 on pb.parent_backup_id = b.id) 
-            select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target
-            from (parent_backup pb
-              join backup2file b2f
-                on b2f.backup_id = pb.id
-              join file f
-                on b2f.file_id=f.id)
-            join (parent_backup pb2
-              join backup2file b2f2
-                on b2f2.backup_id=pb2.id
-              join file f2
-                on b2f2.file_id=f2.id)
-            on f.path=f2.path
-              and f.mtime=f2.mtime
-              and f.size=f2.size
-              and f.filetype=f2.filetype
-              and pb.depth <= pb2.depth
-            group by 1,2,3,4,5,6,7,8,9,10,11,12
-            having count(*)=1
-            order by f.id
+              select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, path, mtime, size, filetype, symlink_target
+              from (
+                select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target, 
+                  f.id as file_id, pb.depth,
+                  row_number() over (partition by f.path order by pb.depth) as rank
+                from parent_backup pb
+                join backup2file b2f
+                  on b2f.backup_id = pb.id
+                join file f
+                  on b2f.file_id=f.id) s
+              where rank=1
+              order by file_id
             "#;
             debug!("Running sql query:\n{sql}\n");
             let mut stmt = conn.prepare(sql)?;
