@@ -385,41 +385,6 @@ macro_rules! cmd {
     };
 }
 
-// fn copy_with_checksum(source: &Path, dest: &Path) -> Result<Vec<u8>> {
-//     let mut len = 0;
-//     let mut init = 0;
-//     let mut reader = std::fs::File::open(source)?;
-//     let mut writer = std::fs::File::create(dest)?;
-//     loop {
-//         let buf = writer.buffer_mut();
-//         let mut read_buf = ReadBuf::uninit(buf.spare_capacity_mut());
-//         // SAFETY: init is either 0 or the initialized_len of the previous iteration
-//         unsafe {
-//             read_buf.assume_init(init);
-//         }
-//         if read_buf.capacity() >= DEFAULT_BUF_SIZE {
-//             match reader.read_buf(&mut read_buf) {
-//                 Ok(()) => {
-//                     let bytes_read = read_buf.filled_len();
-//                     if bytes_read == 0 {
-//                         return Ok(len);
-//                     }
-//                     init = read_buf.initialized_len() - bytes_read;
-//                     // SAFETY: ReadBuf guarantees all of its filled bytes are init
-//                     unsafe { buf.set_len(buf.len() + bytes_read) };
-//                     len += bytes_read as u64;
-//                     // Read again if the buffer still has enough capacity, as BufWriter itself would do
-//                     // This will occur if the reader returns short reads
-//                     continue;
-//                 }
-//                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-//                 Err(e) => return Err(e),
-//             }
-//         }
-//         writer.flush_buf()?;
-//     }
-// }
-
 
 impl Options {
     // perl -ne '
@@ -728,9 +693,17 @@ impl Options {
 
         if drive_slot.status == StorageStatus::Full {
             debug!("Drive slot is full");
-            let empty_slot = ls.iter().
-                filter(|se| se.storage_type==StorageType::Element && se.status==StorageStatus::Empty).
-                next().ok_or(eyre!("Could not find an empty slot"))?;
+            let empty_slot = drive_slot.storage_element_index.
+                and_then(|i| 
+                    ls.iter().filter(|se| 
+                        se.index==i && 
+                        se.storage_type==StorageType::Element && 
+                        se.status == StorageStatus::Empty).next()).
+                or_else(||
+                    ls.iter().filter(|se| 
+                        se.storage_type==StorageType::Element && 
+                        se.status==StorageStatus::Empty).next()).
+                ok_or(eyre!("Could not find an empty slot"))?;
             debug!("Found empty slot: {empty_slot:#?}");
             
             self.unmount_tape()?;
