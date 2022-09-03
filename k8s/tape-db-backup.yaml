@@ -12,6 +12,7 @@ spec:
            # │ │ │ │ ┌───────────── day of the week (0 - 6) (Sunday to Saturday;
            # * * * * *
   schedule: '0 0 * * *'
+  suspend: true
   jobTemplate:
     spec:
       template:
