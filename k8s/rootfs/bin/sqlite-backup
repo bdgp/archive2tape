@@ -32,7 +32,7 @@ PATH=$PATH:/usr/local/bin rotate-backups \
   $([[ -n "$WEEKLY" ]] && echo "--weekly=$WEEKLY") \
   $([[ -n "$MONTHLY" ]] && echo "--monthly=$MONTHLY") \
   $([[ -n "$YEARLY" ]] && echo "--yearly=$YEARLY") \
-  --include="${BACKUP_NAME}_*.db.gz" \
+  --include="${BACKUP_NAME}_*.tar.gz" \
   --prefer-recent --relaxed --verbose --force \
   "$BACKUP_DIR"
 
