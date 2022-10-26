@@ -1196,7 +1196,7 @@ impl Options {
                                                         let sql = r#"delete from backup2file where backup_id=?1 and file_id=?2"#;
                                                         trace!("Running sql delete:\n{sql}\n");
                                                         tx.execute(sql, params![backup_id, new_file.id])?; 
-                                                        let sql = r#"delete from file where id=?1"#;
+                                                        let sql = r#"delete from file f left join backup2file b2f on b2f.file_id=f.id where b2f.file_id is null and f.id=?1"#;
                                                         trace!("Running sql delete:\n{sql}\n");
                                                         tx.execute(sql, params![new_file.id])?; 
                                                         deleted_count += 1;
