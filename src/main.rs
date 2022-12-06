@@ -2001,8 +2001,37 @@ impl Options {
 
                                     info!("{source} -> {dest}", source=source.to_string_lossy(), dest=dest.to_string_lossy());
 
+                                    // make sure correct tape is loaded and mounted
+                                    if old_tape_id != Some(full_backup.tape_id) {
+                                        // get loader status
+                                        if let Some(tape) = tapes.get(&full_backup.tape_id) {
+                                            let ls = self.loader_status()?;
+                                            if let Some(se) = ls.iter().filter(|se| if let Some(label) = &se.label {*label==tape.label} else {false}).next() {
+                                                if se.storage_type == StorageType::Drive {
+                                                    debug!("Tape {label} is already loaded", label=&tape.label);
+                                                    if ! self.is_mounted()? {
+                                                        self.mount_tape()?;
+                                                    }
+                                                }
+                                                else {
+                                                    debug!("Loading tape {label}", label=&tape.label);
+                                                    self.unmount_tape()?;
+                                                    self.load_tape(se.index)?;
+                                                    self.mount_tape()?;
+                                                }
+                                            }
+                                            else {
+                                                Err(eyre!("Could not find tape with label {label} in loader!", label=tape.label))?
+                                            }
+                                        }
+                                        else {
+                                            Err(eyre!("Could not find database record for tape with id {label}!", label=full_backup.tape_id))?
+                                        }
+                                        old_tape_id = Some(full_backup.tape_id);
+                                    }
+
                                     // make sure the source file exists
-                                    if ! (source.exists() && source.is_file()) {
+                                    if !source.exists() {
                                         if restore_cmd.verify_db {
                                             info!("File {source} does not exist, queueing for deletion", source=source.to_string_lossy());
                                             deleted_files.push(full_backup);
@@ -2010,7 +2039,10 @@ impl Options {
                                         else {
                                             Err(eyre!("Error: File {source} does not exist on tape!", source=source.to_string_lossy()))?;
                                         }
-                                    }
+                                    } 
+                                    else if !source.is_file() {
+                                        Err(eyre!("Error: File {source} exists on tape but is not a file!", source=source.to_string_lossy()))?;
+                                    } 
                                     else {
                                         // check file size and checksums match
                                         let metadata = match std::fs::symlink_metadata(&source) {
@@ -2027,34 +2059,6 @@ impl Options {
                                         }
 
                                         if ! restore_cmd.dry_run {
-                                            // make sure correct tape is loaded and mounted
-                                            if old_tape_id != Some(full_backup.tape_id) {
-                                                // get loader status
-                                                if let Some(tape) = tapes.get(&full_backup.tape_id) {
-                                                    let ls = self.loader_status()?;
-                                                    if let Some(se) = ls.iter().filter(|se| if let Some(label) = &se.label {*label==tape.label} else {false}).next() {
-                                                        if se.storage_type == StorageType::Drive {
-                                                            debug!("Tape {label} is already loaded", label=&tape.label);
-                                                            if ! self.is_mounted()? {
-                                                                self.mount_tape()?;
-                                                            }
-                                                        }
-                                                        else {
-                                                            debug!("Loading tape {label}", label=&tape.label);
-                                                            self.unmount_tape()?;
-                                                            self.load_tape(se.index)?;
-                                                            self.mount_tape()?;
-                                                        }
-                                                    }
-                                                    else {
-                                                        Err(eyre!("Could not find tape with label {label} in loader!", label=tape.label))?
-                                                    }
-                                                }
-                                                else {
-                                                    Err(eyre!("Could not find database record for tape with id {label}!", label=full_backup.tape_id))?
-                                                }
-                                                old_tape_id = Some(full_backup.tape_id);
-                                            }
                                             // copy the file
                                             trace!("source={source}", source=source.to_string_lossy());
                                             trace!("tmp_file={tmp_file}", tmp_file=tmp_file.to_string_lossy());
