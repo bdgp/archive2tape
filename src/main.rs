@@ -2,7 +2,7 @@
 use std::os::unix::prelude::MetadataExt;
 use std::path::{PathBuf};
 use std::io::{BufRead, BufReader};
-use std::collections::{HashSet};
+use std::collections::{HashSet, HashMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -152,6 +152,8 @@ enum Command {
     Restore(RestoreCmd),
     ListBackups(ListBackupsCmd),
     ListFiles(ListFilesCmd),
+    #[clap( about = "List the status of all tapes in the db and loader")]
+    ListTapes,
     FormatLTFS(FormatLTFSCmd),
 
     #[clap( about = "Test if the LTFS filesystem is mounted")]
@@ -249,6 +251,16 @@ struct Tape {
     label: String,
     is_full: bool,
     date_added: String,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+struct TapeStatus {
+    label: String,
+    is_full: Option<bool>,
+    date_added: Option<String>,
+    storage_type: Option<StorageType>,
+    index: Option<usize>,
+    storage_element_index: Option<usize>,
 }
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize)]
@@ -2390,6 +2402,44 @@ impl Options {
         }
         Ok(())
     }
+
+    fn list_tapes(&mut self) -> Result<()> {
+        let mut tapes = HashMap::<String,Tape>::new();
+        for tape in self.tape_status()? {
+            tapes.insert(tape.label.clone(), tape);
+        }
+        debug!("got tapes records: {tapes:#?}");
+
+        let ls = self.loader_status()?;
+        let mut tape_labels = BTreeSet::<String>::new();
+        let mut loader_statuses = HashMap::<String,StorageElement>::new();
+        for se in &ls {
+            if let Some(l) = &se.label {
+                tape_labels.insert(l.clone());
+                loader_statuses.insert(l.clone(), se.clone());
+            }
+        }
+        for (label, _) in &tapes {
+            tape_labels.insert(label.clone());
+        }
+
+        self.init_pager()?;
+
+        let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
+        for label in &tape_labels {
+            let tape = tapes.get(label);
+            let ls = loader_statuses.get(label);
+            csv_writer.serialize(TapeStatus {
+                label: label.clone(),
+                is_full: tape.map(|t| t.is_full),
+                date_added: tape.map(|t| t.date_added.clone()),
+                storage_type: ls.map(|l| l.storage_type.clone()),
+                index: ls.map(|l| l.index),
+                storage_element_index: ls.map(|l| l.storage_element_index).flatten(),
+            })?;
+        }
+        Ok(())
+    }
 }
 
 fn run(options: &mut Options) -> Result<()> {
@@ -2430,6 +2480,7 @@ fn run(options: &mut Options) -> Result<()> {
         Some(Command::Restore(_)) => options.restore_files()?,
         Some(Command::ListBackups(_)) => options.list_backups()?,
         Some(Command::ListFiles(_)) => options.list_files()?,
+        Some(Command::ListTapes) => options.list_tapes()?,
         Some(Command::FormatLTFS(_)) => info!("{:#?}", options.format_ltfs()),
         Some(Command::IsMounted) => info!("{:#?}", options.is_mounted()),
         Some(Command::IsTapeFull) => info!("{:#?}", options.is_tape_full()),
