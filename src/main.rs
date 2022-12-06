@@ -1733,25 +1733,22 @@ impl Options {
 
         if let Some(backup) = backup {
             debug!("Found backup record: {backup:#?}");
-            let date_created = backup.date_created;
-            let naive = NaiveDateTime::from_timestamp(date_created, 0);
-            let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
-            let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
-            let timestamp = format!("{newdate}");
-            debug!("timestamp={timestamp}");
 
-            let source_path = [
-                &self.ltfs_path, 
-                &PathBuf::from("backup"),
-                &PathBuf::from(
-                    self.db.file_stem().unwrap_or(&OsString::from("backup"))),
-                &PathBuf::from(timestamp),
-                &PathBuf::from(&backup.uuid),
-                &PathBuf::from("rootfs"),
-            ].iter().collect::<PathBuf>();
-            debug!("source_path={source_path}", source_path=source_path.to_string_lossy());
+            // get the complete set of backup records for reference
+            let mut backups = LinkedHashMap::<i64, Backup>::new();
+            {
+                let sql = format!(r#" select * from backup "#);
+                debug!("Running query: {sql}");
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query(params![])?;
+                let mut rows_iter = serde_rusqlite::from_rows::<Backup>(rows);
+                while let Some(backup_record) = rows_iter.next() {
+                    let backup_record = backup_record?;
+                    backups.insert(backup_record.id, backup_record);
+                }
+            }
 
-            // get the complete list of backup records from the db
+            // get the complete list of fullbackup file records from the db
             let sql = r#"
               with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
               select id, date_created, uuid, parent_backup_id, 0 as depth
@@ -1859,6 +1856,27 @@ impl Options {
                             }
                         }
                     }
+
+                    let backup = backups.get(&full_backup.backup_id).
+                        ok_or_else(|| eyre!("Could not find backup record for id {id}", id=full_backup.backup_id))?;
+
+                    let date_created = backup.date_created;
+                    let naive = NaiveDateTime::from_timestamp(date_created, 0);
+                    let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
+                    let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
+                    let timestamp = format!("{newdate}");
+                    debug!("timestamp={timestamp}");
+
+                    let source_path = [
+                        &self.ltfs_path, 
+                        &PathBuf::from("backup"),
+                        &PathBuf::from(
+                            self.db.file_stem().unwrap_or(&OsString::from("backup"))),
+                        &PathBuf::from(timestamp),
+                        &PathBuf::from(&backup.uuid),
+                        &PathBuf::from("rootfs"),
+                    ].iter().collect::<PathBuf>();
+                    debug!("source_path={source_path}", source_path=source_path.to_string_lossy());
 
                     let full_backup_path = full_backup.path.strip_prefix("/").unwrap_or_else(|_| full_backup.path.as_path());
                     let source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
