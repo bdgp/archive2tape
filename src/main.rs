@@ -2123,12 +2123,12 @@ impl Options {
                 let tx = conn.transaction()?;
                 for full_backup in &deleted_files {
                     info!("Removing records for {source}", source=full_backup.path.to_string_lossy());
-                    let sql = r#"delete from backup2file where backup_id=?1 and file_id=?2"#;
-                    trace!("Running sql delete:\n{sql}\n");
-                    tx.execute(sql, params![full_backup.backup_id, full_backup.file_id])?; 
-                    let sql = r#"delete from file f left join backup2file b2f on b2f.file_id=f.id where b2f.file_id is null and f.id=?1"#;
+                    let sql = r#"delete from backup2file where file_id=?1"#;
                     trace!("Running sql delete:\n{sql}\n");
                     tx.execute(sql, params![full_backup.file_id])?; 
+                    let sql = r#"delete from file where id=?1"#;
+                    trace!("Running sql delete:\n{sql}\n");
+                    tx.execute(sql, params![full_backup.file_id])?;
                 }
                 tx.commit()?;
                 info!("Verification complete, removed {count} files from the database", count=deleted_files.len());
