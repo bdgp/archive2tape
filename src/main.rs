@@ -947,6 +947,8 @@ impl Options {
                 mode integer not null,
                 is_deleted integer not null
             );
+            create index if not exists backup2file_backup_id_idx on backup2file (backup_id);
+            create index if not exists backup2file_file_id_idx on backup2file (file_id);
             "#;
             debug!("Running sql:\n{sql}\n");
             conn.execute_batch(sql)?;
@@ -1207,10 +1209,10 @@ impl Options {
                                                     if ! file_exists {
                                                         trace!("File {path} does not exist, queueing for deletion", path=path.to_string_lossy());
                                                         trace!("Removing records for {new_file:#?}");
-                                                        let sql = r#"delete from backup2file where backup_id=?1 and file_id=?2"#;
+                                                        let sql = r#"delete from backup2file where file_id=?1"#;
                                                         trace!("Running sql delete:\n{sql}\n");
-                                                        tx.execute(sql, params![backup_id, new_file.id])?; 
-                                                        let sql = r#"delete from file f left join backup2file b2f on b2f.file_id=f.id where b2f.file_id is null and f.id=?1"#;
+                                                        tx.execute(sql, params![new_file.id])?; 
+                                                        let sql = r#"delete from file where id=?1"#;
                                                         trace!("Running sql delete:\n{sql}\n");
                                                         tx.execute(sql, params![new_file.id])?; 
                                                         deleted_count += 1;
