@@ -2406,6 +2406,8 @@ impl Options {
     }
 
     fn list_tapes(&mut self) -> Result<()> {
+        debug!("Running list_tapes");
+        self.init_db()?;
         let mut tapes = HashMap::<String,Tape>::new();
         for tape in self.tape_status()? {
             tapes.insert(tape.label.clone(), tape);
@@ -2424,21 +2426,28 @@ impl Options {
         for (label, _) in &tapes {
             tape_labels.insert(label.clone());
         }
+        debug!("tape_labels={tape_labels:#?}");
+        debug!("loader_statuses={loader_statuses:#?}");
 
         self.init_pager()?;
 
         let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
         for label in &tape_labels {
+            debug!("label={label:#?}");
             let tape = tapes.get(label);
+            debug!("tape={tape:#?}");
             let ls = loader_statuses.get(label);
-            csv_writer.serialize(TapeStatus {
+            debug!("ls={ls:#?}");
+            let ts = TapeStatus {
                 label: label.clone(),
                 is_full: tape.map(|t| t.is_full),
                 date_added: tape.map(|t| t.date_added.clone()),
                 storage_type: ls.map(|l| l.storage_type.clone()),
                 index: ls.map(|l| l.index),
                 storage_element_index: ls.map(|l| l.storage_element_index).flatten(),
-            })?;
+            };
+            debug!("ts={ts:#?}");
+            csv_writer.serialize(ts)?;
         }
         Ok(())
     }
