@@ -92,6 +92,8 @@ struct RestoreCmd {
     dry_run: bool,
     #[clap(long, help = "Remove database records if the file does not exist on tape")]
     verify_db: bool,
+    #[clap(long, help = "List tapes required for this restore command")]
+    list_tapes: bool,
     #[clap(long, help = "Only restore from complete backups")]
     complete: bool,
     #[clap(help = "Glob patterns to filter restore files", name="PATTERN")]
@@ -382,6 +384,13 @@ struct NewFile {
     #[serde(serialize_with = "option_pathbuf_serialize")]
     #[serde(deserialize_with = "option_pathbuf_deserialize")]
     symlink_target: Option<PathBuf>,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+struct ListTape {
+    label: String,
+    is_loaded: bool,
+    is_required: bool,
 }
 
 macro_rules! cmd {
@@ -1690,6 +1699,8 @@ impl Options {
         debug!("Running restore_files");
         self.init_db()?;
 
+        let mut list_tapes = LinkedHashMap::<String,ListTape>::new();
+
         let restore_cmd = match &self.cmd {
             Some(Command::Restore(r)) => r,
             _ => Err(eyre!("Couldn't match restore subcommand!"))?,
@@ -1915,7 +1926,7 @@ impl Options {
                                     Err(_) => {
                                         trace!("set mtime of old_dir {od} to {mtime}", od=od.to_string_lossy());
                                         let filetime = FileTime::from_unix_time(*mtime, 0);
-                                        if ! restore_cmd.dry_run {
+                                        if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                             filetime::set_file_times(od, filetime.clone(), filetime.clone())?;
                                         }
                                         old_dir.pop();
@@ -1924,7 +1935,7 @@ impl Options {
                             }
                         }
                         trace!("create parent directories for {}", parent.to_string_lossy());
-                        if ! restore_cmd.dry_run {
+                        if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                             std::fs::create_dir_all(parent)?;
                         }
                     }
@@ -1936,7 +1947,7 @@ impl Options {
                             info!("{source}/ -> {dest}/", source=source.to_string_lossy(), dest=dest.to_string_lossy());
                             let mut mtime = full_backup.mtime;
                             let md = std::fs::metadata(&dest).ok(); 
-                            if ! restore_cmd.dry_run {
+                            if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                 trace!("mkdir {} with mode {}", dest.to_string_lossy(), full_backup.mode);
                                 match nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode)) {
                                     Ok(_) | Err(nix::errno::Errno::EEXIST) => (),
@@ -1961,7 +1972,7 @@ impl Options {
                             }
                             let target = full_backup.symlink_target.ok_or_else(|| eyre!("Symlink target is null!"))?;
                             info!("{source} -> {dest} ({target})", source=source.to_string_lossy(), dest=dest.to_string_lossy(), target=target.to_string_lossy());
-                            if ! restore_cmd.dry_run {
+                            if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                 if dest.exists() {
                                     trace!("remove destination {}", dest.to_string_lossy());
                                     std::fs::remove_file(&dest)?;
@@ -1996,7 +2007,7 @@ impl Options {
                                 let attr = std::fs::metadata(&dest)?;
                                 if dest.is_file() && attr.mtime() == full_backup.mtime && attr.size() == full_backup.size {
                                     trace!("file {} is already up to date", dest.to_string_lossy());
-                                    if ! restore_cmd.dry_run {
+                                    if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                         // set uid:gid
                                         trace!("chown {}", dest.to_string_lossy());
                                         nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
@@ -2006,7 +2017,7 @@ impl Options {
                                     }
                                     continue;
                                 }
-                                else if ! restore_cmd.dry_run {
+                                else if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                     // remove existing destination file to break any hard links
                                     trace!("remove existing file {}", dest.to_string_lossy());
                                     std::fs::remove_file(&dest)?;
@@ -2039,21 +2050,43 @@ impl Options {
                                         if let Some(tape) = tapes.get(&full_backup.tape_id) {
                                             let ls = self.loader_status()?;
                                             if let Some(se) = ls.iter().filter(|se| if let Some(label) = &se.label {*label==tape.label} else {false}).next() {
-                                                if se.storage_type == StorageType::Drive {
-                                                    debug!("Tape {label} is already loaded", label=&tape.label);
-                                                    if ! self.is_mounted()? {
-                                                        self.mount_tape()?;
+                                                if restore_cmd.list_tapes {
+                                                    if ! list_tapes.contains_key(&tape.label) {
+                                                        list_tapes.insert(tape.label.clone(), ListTape {
+                                                            label: tape.label.clone(),
+                                                            is_loaded: true,
+                                                            is_required: false,
+                                                        });
                                                     }
                                                 }
                                                 else {
-                                                    debug!("Loading tape {label}", label=&tape.label);
-                                                    self.unmount_tape()?;
-                                                    self.load_tape(se.index)?;
-                                                    self.mount_tape()?;
+                                                    if se.storage_type == StorageType::Drive {
+                                                        debug!("Tape {label} is already loaded", label=&tape.label);
+                                                        if ! self.is_mounted()? {
+                                                            self.mount_tape()?;
+                                                        }
+                                                    }
+                                                    else {
+                                                        debug!("Loading tape {label}", label=&tape.label);
+                                                        self.unmount_tape()?;
+                                                        self.load_tape(se.index)?;
+                                                        self.mount_tape()?;
+                                                    }
                                                 }
                                             }
                                             else {
-                                                Err(eyre!("Could not find tape with label {label} in loader!", label=tape.label))?
+                                                if restore_cmd.list_tapes {
+                                                    if ! list_tapes.contains_key(&tape.label) {
+                                                        list_tapes.insert(tape.label.clone(), ListTape {
+                                                            label: tape.label.clone(),
+                                                            is_loaded: false,
+                                                            is_required: false,
+                                                        });
+                                                    }
+                                                }
+                                                else {
+                                                    Err(eyre!("Could not find tape with label {label} in loader!", label=tape.label))?
+                                                }
                                             }
                                         }
                                         else {
@@ -2090,7 +2123,17 @@ impl Options {
                                             Err(eyre!("Error: File {source} has mtime {mmtime} is different than database size {fbmtime}", source=source.to_string_lossy(), mmtime=metadata.mtime(), fbmtime=full_backup.mtime))?;
                                         }
 
-                                        if ! restore_cmd.dry_run {
+                                        if restore_cmd.list_tapes {
+                                            if let Some(tape) = tapes.get(&full_backup.tape_id) {
+                                                if let Some(lt) = list_tapes.get_mut(&tape.label) {
+                                                    if ! lt.is_required {
+                                                        lt.is_required = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                             // copy the file
                                             trace!("source={source}", source=source.to_string_lossy());
                                             trace!("tmp_file={tmp_file}", tmp_file=tmp_file.to_string_lossy());
@@ -2127,7 +2170,7 @@ impl Options {
             // set the mtime for the previous directory
             while let Some((old_dir, mtime)) = old_dir.pop() {
                 let filetime = FileTime::from_unix_time(mtime, 0);
-                if ! restore_cmd.dry_run {
+                if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                     trace!("set mtime for old_dir {} to {}", old_dir.to_string_lossy(), mtime);
                     filetime::set_file_times(old_dir, filetime.clone(), filetime.clone())?;
                 }
@@ -2151,7 +2194,17 @@ impl Options {
         else {
             Err(eyre!("No backup found matching backup_id {backup_id:#?}", backup_id=restore_cmd.backup_id))?
         }
-        info!("Restore complete");
+
+        if restore_cmd.list_tapes {
+            self.init_pager()?;
+            let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
+            for (_, lt) in list_tapes {
+                csv_writer.serialize(lt)?;
+            }
+        }
+        else {
+            info!("Restore complete");
+        }
         Ok(())
     }
 
