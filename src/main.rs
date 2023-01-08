@@ -1994,8 +1994,10 @@ impl Options {
                         },
                         FileType::File => {
                             trace!("{} is a file", dest.to_string_lossy());
+                            let mut is_required = true;
                             if dest.exists() {
                                 if restore_cmd.noclobber {
+                                    debug!("File {} already exists, skipping because noclobber is set", dest=dest.to_string_lossy());
                                     continue;
                                 } 
                                 if dest.is_dir() {
@@ -2015,16 +2017,19 @@ impl Options {
                                         trace!("chmod {}", dest.to_string_lossy());
                                         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
                                     }
-                                    continue;
+                                    is_required = false;
                                 }
-                                else if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                                    // remove existing destination file to break any hard links
-                                    trace!("remove existing file {}", dest.to_string_lossy());
-                                    std::fs::remove_file(&dest)?;
+                                else {
+                                    if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                                        // remove existing destination file to break any hard links
+                                        trace!("remove existing file {}", dest.to_string_lossy());
+                                        std::fs::remove_file(&dest)?;
+                                    }
                                 }
                             }
                             if let Some(dest_path) = dest.parent() {
                                 if let Some(file_name) = dest.file_name() {
+                                    // generate temp file name
                                     let randext = rand::thread_rng()
                                         .sample_iter(&Alphanumeric)
                                         .take(10)
@@ -2051,15 +2056,20 @@ impl Options {
                                             let ls = self.loader_status()?;
                                             if let Some(se) = ls.iter().filter(|se| if let Some(label) = &se.label {*label==tape.label} else {false}).next() {
                                                 if restore_cmd.list_tapes {
-                                                    if ! list_tapes.contains_key(&tape.label) {
+                                                    if let Some(lt) = list_tapes.get_mut(&tape.label) {
+                                                        if is_required && !lt.is_required {
+                                                            lt.is_required = is_required;
+                                                        }
+                                                    }
+                                                    else {
                                                         list_tapes.insert(tape.label.clone(), ListTape {
                                                             label: tape.label.clone(),
                                                             is_loaded: true,
-                                                            is_required: false,
+                                                            is_required: is_required,
                                                         });
                                                     }
                                                 }
-                                                else {
+                                                else if is_required {
                                                     if se.storage_type == StorageType::Drive {
                                                         debug!("Tape {label} is already loaded", label=&tape.label);
                                                         if ! self.is_mounted()? {
@@ -2076,11 +2086,16 @@ impl Options {
                                             }
                                             else {
                                                 if restore_cmd.list_tapes {
-                                                    if ! list_tapes.contains_key(&tape.label) {
+                                                    if let Some(lt) = list_tapes.get_mut(&tape.label) {
+                                                        if is_required && !lt.is_required {
+                                                            lt.is_required = is_required;
+                                                        }
+                                                    }
+                                                    else {
                                                         list_tapes.insert(tape.label.clone(), ListTape {
                                                             label: tape.label.clone(),
                                                             is_loaded: false,
-                                                            is_required: false,
+                                                            is_required: is_required,
                                                         });
                                                     }
                                                 }
@@ -2093,6 +2108,14 @@ impl Options {
                                             Err(eyre!("Could not find database record for tape with id {label}!", label=full_backup.tape_id))?
                                         }
                                         old_tape_id = Some(full_backup.tape_id);
+                                    }
+
+                                    // if --list-tapes was specified, skip the next section, since the tape
+                                    // won't actually be loaded
+                                    // if is_required is false, then skip as well, since the file is already
+                                    // present
+                                    if restore_cmd.list_tapes || ! is_required {
+                                        continue;
                                     }
 
                                     // make sure the source file exists
@@ -2113,7 +2136,7 @@ impl Options {
                                         let metadata = match std::fs::symlink_metadata(&source) {
                                             Ok(m) => m,
                                             Err(e) => {
-                                                Err(eyre!("Could not extract metadata for file {}, skipping: {e}", source.to_string_lossy()))?
+                                                Err(eyre!("Could not extract metadata for file {}: {}", source.to_string_lossy(), e))?
                                             }
                                         };
                                         if metadata.size() != full_backup.size {
@@ -2123,17 +2146,7 @@ impl Options {
                                             Err(eyre!("Error: File {source} has mtime {mmtime} is different than database size {fbmtime}", source=source.to_string_lossy(), mmtime=metadata.mtime(), fbmtime=full_backup.mtime))?;
                                         }
 
-                                        if restore_cmd.list_tapes {
-                                            if let Some(tape) = tapes.get(&full_backup.tape_id) {
-                                                if let Some(lt) = list_tapes.get_mut(&tape.label) {
-                                                    if ! lt.is_required {
-                                                        lt.is_required = true;
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                                        if ! restore_cmd.dry_run {
                                             // copy the file
                                             trace!("source={source}", source=source.to_string_lossy());
                                             trace!("tmp_file={tmp_file}", tmp_file=tmp_file.to_string_lossy());
