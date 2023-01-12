@@ -48,7 +48,10 @@ spec:
               chmod u=s,go=x /bin/su-exec
 
               # /data/iarpa
-              su-exec bbooth archive2tape --db /srv/tape-archives/db/iarpa.db --log /srv/tape-archives/log/iarpa.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/iarpa /data/felix_transition_materials
+              #su-exec bbooth archive2tape --db /srv/tape-archives/db/iarpa.db --log /srv/tape-archives/log/iarpa.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/iarpa /data/felix_transition_materials
+
+              # /data/teirex
+              su-exec bbooth archive2tape --db /srv/tape-archives/db/teirex.db --log /srv/tape-archives/log/teirex.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/teirex
 
               su-exec bbooth sqlite-backup /srv/tape-archives/db
               su-exec bbooth rsync -av /srv/tape-archives/log /backup/
