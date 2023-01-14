@@ -2558,17 +2558,20 @@ fn run(options: &mut Options) -> Result<()> {
         Some(Command::ListBackups(_)) => options.list_backups()?,
         Some(Command::ListFiles(_)) => options.list_files()?,
         Some(Command::ListTapes) => options.list_tapes()?,
-        Some(Command::FormatLTFS(_)) => info!("{:#?}", options.format_ltfs()),
-        Some(Command::IsMounted) => info!("{:#?}", options.is_mounted()),
-        Some(Command::IsTapeFull) => info!("{:#?}", options.is_tape_full()),
+        Some(Command::FormatLTFS(_)) => info!("{:#?}", options.format_ltfs()?),
+        Some(Command::IsMounted) => info!("{:#?}", options.is_mounted()?),
+        Some(Command::IsTapeFull) => info!("{:#?}", options.is_tape_full()?),
         Some(Command::LoaderStatus) => options.loader_status_view()?,
         Some(Command::LoadTape(load_tape_cmd)) => info!("{:#?}", options.load_tape(load_tape_cmd.slot)?),
         Some(Command::MountTape) => info!("{:#?}", options.mount_tape()?),
         Some(Command::ReadyStorage) => info!("{:#?}", options.ready_storage()?),
-        Some(Command::TapeStatus) => info!("{:#?}", options.tape_status()),
+        Some(Command::TapeStatus) => {
+            options.init_db()?;
+            info!("{:#?}", options.tape_status()?);
+        },
         Some(Command::UnmountTape) => info!("{:#?}", options.unmount_tape()?),
-        Some(Command::WaitForDrive) => info!("{:#?}", options.wait_for_drive()),
-        Some(Command::WaitForLTFSProcessToTerminate) => info!("{:#?}", options.wait_for_ltfs_process_to_terminate()),
+        Some(Command::WaitForDrive) => info!("{:#?}", options.wait_for_drive()?),
+        Some(Command::WaitForLTFSProcessToTerminate) => info!("{:#?}", options.wait_for_ltfs_process_to_terminate()?),
         _ => {
             Options::clap().print_long_help()?;
             println!("");
