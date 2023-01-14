@@ -1944,7 +1944,9 @@ impl Options {
                     match full_backup.filetype {
                         FileType::Directory => {
                             trace!("is a directory");
-                            info!("{source}/ -> {dest}/", source=source.to_string_lossy(), dest=dest.to_string_lossy());
+                            if ! restore_cmd.list_tapes {
+                                info!("{source}/ -> {dest}/", source=source.to_string_lossy(), dest=dest.to_string_lossy());
+                            }
                             let mut mtime = full_backup.mtime;
                             let md = std::fs::metadata(&dest).ok(); 
                             if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
@@ -1967,11 +1969,14 @@ impl Options {
                             if dest.exists() && restore_cmd.noclobber {
                                 continue;
                             }
-                            if dest.is_dir() {
-                                Err(eyre!("Destination {dest} is a directory instead of a symlink!", dest=dest.to_string_lossy()))?;
+                            if ! dest.is_symlink() && dest.is_dir() {
+                                error!("Destination {dest} is a directory instead of a symlink!", dest=dest.to_string_lossy());
+                                continue;
                             }
                             let target = full_backup.symlink_target.ok_or_else(|| eyre!("Symlink target is null!"))?;
-                            info!("{source} -> {dest} ({target})", source=source.to_string_lossy(), dest=dest.to_string_lossy(), target=target.to_string_lossy());
+                            if ! restore_cmd.list_tapes {
+                                info!("{source} -> {dest} ({target})", source=source.to_string_lossy(), dest=dest.to_string_lossy(), target=target.to_string_lossy());
+                            }
                             if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                 if dest.exists() {
                                     trace!("remove destination {}", dest.to_string_lossy());
@@ -2000,8 +2005,9 @@ impl Options {
                                     debug!("File {} already exists, skipping because noclobber is set", dest=dest.to_string_lossy());
                                     continue;
                                 } 
-                                if dest.is_dir() {
-                                    Err(eyre!("Destination {dest} is a directory instead of a file!", dest=dest.to_string_lossy()))?;
+                                if ! dest.is_symlink() && dest.is_dir() {
+                                    error!("Destination {dest} is a directory instead of a file!", dest=dest.to_string_lossy());
+                                    continue;
                                 }
 
                                 // if mtime and size is the same, skip copying the file
@@ -2027,6 +2033,12 @@ impl Options {
                                     }
                                 }
                             }
+                            if is_required {
+                                trace!("Tape {:#?} is required due to file {}", 
+                                    tapes.get(&full_backup.tape_id).map(|t| t.label.clone()),
+                                    dest.to_string_lossy(),
+                                );
+                            }
                             if let Some(dest_path) = dest.parent() {
                                 if let Some(file_name) = dest.file_name() {
                                     // generate temp file name
@@ -2047,7 +2059,9 @@ impl Options {
                                     ].iter().collect::<PathBuf>();
                                     trace!("tmp_file = {}", tmp_file.to_string_lossy());
 
-                                    info!("{source} -> {dest}", source=source.to_string_lossy(), dest=dest.to_string_lossy());
+                                    if ! restore_cmd.list_tapes {
+                                        info!("{source} -> {dest}", source=source.to_string_lossy(), dest=dest.to_string_lossy());
+                                    }
 
                                     // make sure correct tape is loaded and mounted
                                     if old_tape_id != Some(full_backup.tape_id) {
@@ -2146,7 +2160,7 @@ impl Options {
                                             Err(eyre!("Error: File {source} has mtime {mmtime} is different than database size {fbmtime}", source=source.to_string_lossy(), mmtime=metadata.mtime(), fbmtime=full_backup.mtime))?;
                                         }
 
-                                        if ! restore_cmd.dry_run {
+                                        if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                             // copy the file
                                             trace!("source={source}", source=source.to_string_lossy());
                                             trace!("tmp_file={tmp_file}", tmp_file=tmp_file.to_string_lossy());
