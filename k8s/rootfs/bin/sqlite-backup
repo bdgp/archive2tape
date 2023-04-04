@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 set -eu -o pipefail
 shopt -s nullglob
-DB_PATH=${1-}
-if [[ -z $DB_PATH ]]; then
-  echo "Usage: $0 DB_PATH" >&2
-  exit 1
-fi
+DB_PATH=${1-/srv/tape-archives/db}
 if [[ ! -d $DB_PATH ]]; then
   echo "Could not find db directory $DB_PATH!" >&2
   exit 1
