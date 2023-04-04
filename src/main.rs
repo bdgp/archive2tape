@@ -180,7 +180,7 @@ enum Command {
 }
 
 #[derive(Parser, Debug)]
-#[clap(name = "backup2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::UnifiedHelpMessage])]
+#[clap(name = "archive2tape", about = "Incremental tape archiving tool", global_settings = &[clap::AppSettings::ColoredHelp, clap::AppSettings::UnifiedHelpMessage])]
 struct Options {
     #[clap(long, help = "Path to tape drive device", name="DRIVE_DEVICE", default_value="/dev/st1")]
     drive: PathBuf,
