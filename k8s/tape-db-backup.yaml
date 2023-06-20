@@ -56,6 +56,9 @@ spec:
               # /data/seqdata
               su-exec bbooth archive2tape --db /srv/tape-archives/db/seqdata.db --log /srv/tape-archives/log/seqdata.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/seqdata
 
+              # /data/analysis
+              su-exec bbooth archive2tape --db /srv/tape-archives/db/analysis.db --log /srv/tape-archives/log/analysis.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/analysis
+
               su-exec bbooth sqlite-backup /srv/tape-archives/db
               su-exec bbooth rsync -av /srv/tape-archives/log /backup/
             volumeMounts:
