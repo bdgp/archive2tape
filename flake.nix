@@ -56,18 +56,23 @@
             ln -sfvn /bin/env usr/bin/env
             '';
           };
-          archive2tape-result = pkgs.stdenv.mkDerivation rec {
-            name = "archive2tape-result";
-            unpackPhase = ":";
-            installPhase = ''
-            mkdir -p "$out"
-            ln -sfvn ${archive2tape} "$out"/archive2tape
-            ln -sfvn ${archive2tape-image} "$out"/archive2tape-image
+          archive2tape-shell = pkgs.mkShell rec {
+            LOCALE_ARCHIVE="${pkgs.glibcLocales}/lib/locale/locale-archive";
+            buildInputs = with pkgs; [
+              rustup gcc bashInteractive coreutils findutils glibcLocales 
+              rotate-backups pigz gnugrep tini
+              mtx mt-st fuse pspg less sqlite litecli
+              ltfs util-linux rsync gnutar gzip
+            ];
+            shellHook = '' 
+            export RUSTUP_HOME=$PWD/.rustup
+            export PATH=$RUSTUP_HOME/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH
             '';
           };
-          default = packages.archive2tape-result;
-
         };
+        default = packages.archive2tape-image;
+        devShell = packages.archive2tape-shell;
       }
     );
 }
+
