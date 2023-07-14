@@ -59,6 +59,15 @@ spec:
               # /data/analysis
               su-exec bbooth archive2tape --db /srv/tape-archives/db/analysis.db --log /srv/tape-archives/log/analysis.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/analysis
 
+              # /data/insitu-production
+              su-exec bbooth archive2tape --db /srv/tape-archives/db/insitu-production.db --log /srv/tape-archives/log/insitu-production.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/insitu-production
+
+              # /data/insitu-public
+              su-exec bbooth archive2tape --db /srv/tape-archives/db/insitu-public.db --log /srv/tape-archives/log/insitu-public.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/insitu-public
+
+              # /data/smorf
+              su-exec bbooth archive2tape --db /srv/tape-archives/db/smorf.db --log /srv/tape-archives/log/smorf.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/smorf
+
               su-exec bbooth sqlite-backup /srv/tape-archives/db
               su-exec bbooth rsync -av /srv/tape-archives/log /backup/
             volumeMounts:
