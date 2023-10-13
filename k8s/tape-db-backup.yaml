@@ -53,6 +53,9 @@ spec:
               # /data/teirex
               su-exec bbooth archive2tape --db /srv/tape-archives/db/teirex.db --log /srv/tape-archives/log/teirex.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/teirex
 
+              # /mnt/teirex
+              su-exec bbooth archive2tape --db /srv/tape-archives/db/mnt-teirex.db --log /srv/tape-archives/log/mnt-teirex.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /mnt/teirex
+
               # /data/seqdata
               su-exec bbooth archive2tape --db /srv/tape-archives/db/seqdata.db --log /srv/tape-archives/log/seqdata.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8' backup /data/seqdata
 
