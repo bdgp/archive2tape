@@ -27,7 +27,7 @@ spec:
                     values:
                     - ubx
           containers:
-          - image: "fiji.lbl.gov/bdgp/archive2tape"
+          - image: "fiji:443/bdgp/archive2tape"
             name: db-backup
             imagePullPolicy: Always
             securityContext:
@@ -88,18 +88,6 @@ spec:
             - mountPath: /mnt
               mountPropagation: HostToContainer
               name: mnt
-            - mountPath: /persistent
-              mountPropagation: HostToContainer
-              name: persistent
-            - mountPath: /databrown
-              mountPropagation: HostToContainer
-              name: databrown
-            - mountPath: /karpendata
-              mountPropagation: HostToContainer
-              name: karpendata
-            - mountPath: /karpensecondary
-              mountPropagation: HostToContainer
-              name: karpensecondary
             - mountPath: /srv
               mountPropagation: HostToContainer
               name: srv
@@ -138,22 +126,6 @@ spec:
               path: /mnt
               type: ""
             name: mnt
-          - hostPath:
-              path: /persistent
-              type: ""
-            name: persistent
-          - hostPath:
-              path: /databrown
-              type: ""
-            name: databrown
-          - hostPath:
-              path: /karpendata
-              type: ""
-            name: karpendata
-          - hostPath:
-              path: /karpensecondary
-              type: ""
-            name: karpensecondary
           - hostPath:
               path: /srv
               type: ""

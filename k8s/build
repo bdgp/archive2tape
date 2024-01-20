@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -eux -o pipefail
-dr=${DOCKER_REGISTRY:-fiji.lbl.gov/bdgp}
+dr=${DOCKER_REGISTRY:-fiji:443/bdgp}
 img=${DOCKER_IMAGE:-archive2tape}
 
 #(cd .. && nix run github:cargo2nix/cargo2nix)

@@ -36,7 +36,7 @@
           archive2tape-image = let 
             rootfs = ./k8s/rootfs;
           in with pkgs; pkgs.dockerTools.streamLayeredImage {
-            name = "fiji.lbl.gov/bdgp/archive2tape";
+            name = "fiji:443/bdgp/archive2tape";
             tag = "latest";
             contents = [
               bashInteractive coreutils findutils glibcLocales 
