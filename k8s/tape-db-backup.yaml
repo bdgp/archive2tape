@@ -82,9 +82,6 @@ spec:
             - mountPath: /users
               mountPropagation: HostToContainer
               name: users
-            - mountPath: /www
-              mountPropagation: HostToContainer
-              name: www
             - mountPath: /mnt
               mountPropagation: HostToContainer
               name: mnt
@@ -118,10 +115,6 @@ spec:
               path: /users
               type: ""
             name: users
-          - hostPath:
-              path: /www
-              type: ""
-            name: www
           - hostPath:
               path: /mnt
               type: ""
