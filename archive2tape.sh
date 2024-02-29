@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+if (( $EUID != 0 )); then
+    echo "Please run as root"
+    exit
+fi
 #./target/release/archive2tape --db /srv/tape-archives/db/iarpa.db --log /srv/tape-archives/log/iarpa.log --create-db backup /data/iarpa
 #./target/release/archive2tape --db /srv/tape-archives/db/smorf.db --log /srv/tape-archives/log/smorf.log --create-db backup /data/smorf
 ./target/release/archive2tape --db /srv/tape-archives/db/teirex.db --log /srv/tape-archives/log/teirex.log --create-db backup /data/teirex
