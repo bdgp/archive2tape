@@ -49,7 +49,7 @@ use format_bytes::format_bytes;
 
 // Checksums:
 // serial checksumming - done
-// set restore deduplication method --dedup-method copy, hardlink, symlink, reflink, hardlink-script, symlink-script, reflink-script --dedup-script-path --dedup-script-remap
+// set restore deduplication method --dedup-method copy, hardlink, symlink, reflink, hardlink-script, symlink-script, reflink-script --dedup-script-path --dedup-script-remap - done
 // restore with deduplication - done
 // backfill-checksums subcommand - done
 // validate-checksums subcommand - done
@@ -1177,6 +1177,7 @@ impl Options {
             debug!("Transfer tapes_db tape and tape_tag records to db tape table");
             {
                 let tapes = self.tape_status()?;
+                let tape_tags = self.get_tape_tags()?;
                 let tx = conn.transaction()?;
                 {
                     let mut stmt = tx.prepare(r#"insert into tape (id,label,is_full,date_added) values (:id,:label,:is_full,:date_added) on conflict(label) do nothing"#)?;
@@ -1184,23 +1185,10 @@ impl Options {
                         debug!("Inserting tape record {tape:?}");
                         stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape, &["id","label","is_full","date_added"])?.to_slice().as_slice())?;
                     }
-                    if let Some(tapes_db) = &self.tapes_db {
-                        let mut tape_tags = Vec::<TapeTag>::new();
-                        {
-                            let conn = Connection::open(tapes_db)?;
-                            let mut stmt = conn.prepare("select * from tape_tag")?;
-                            let rows = stmt.query(params![])?;
-                            let mut rows_iter = serde_rusqlite::from_rows::<TapeTag>(rows);
-                            while let Some(tape_tag) = rows_iter.next() {
-                                let tape_tag = tape_tag?;
-                                tape_tags.push(tape_tag);
-                            }
-                        }
-                        let mut stmt = tx.prepare(r#"insert into tape_tag (tape_id,tag) values (:tape_id,:tag) on conflict(tape_id,tag) do nothing"#)?;
-                        for tape_tag in &tape_tags {
-                            debug!("Inserting tape_tag record {tape_tag:?}");
-                            stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape_tag, &["tape_id","tag"])?.to_slice().as_slice())?;
-                        }
+                    let mut stmt = tx.prepare(r#"insert into tape_tag (tape_id,tag) values (:tape_id,:tag) on conflict(tape_id,tag) do nothing"#)?;
+                    for tape_tag in &tape_tags {
+                        debug!("Inserting tape_tag record {tape_tag:?}");
+                        stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape_tag, &["tape_id","tag"])?.to_slice().as_slice())?;
                     }
                 }
                 tx.commit()?;
