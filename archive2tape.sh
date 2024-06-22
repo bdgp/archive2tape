@@ -8,8 +8,8 @@ fi
 ./target/release/archive2tape --db /srv/tape-archives/db/teirex.db --log /srv/tape-archives/log/teirex.log --create-db backup /data/teirex
 #./target/release/archive2tape --db /srv/tape-archives/db/mnt-local-teirex.db --log /srv/tape-archives/log/mnt-local-teirex.log --create-db backup /mnt/local/teirex
 ./target/release/archive2tape --db /srv/tape-archives/db/flash_ldrd.db --log /srv/tape-archives/log/flash_ldrd.log --create-db backup /data/flash_ldrd
-#./target/release/archive2tape --db /srv/tape-archives/db/analysis.db --log /srv/tape-archives/log/analysis.log --create-db backup /data/analysis
-#./target/release/archive2tape --db /srv/tape-archives/db/seqdata.db --log /srv/tape-archives/log/seqdata.log --create-db backup /data/seqdata
+./target/release/archive2tape --db /srv/tape-archives/db/analysis.db --log /srv/tape-archives/log/analysis.log --create-db backup /data/analysis
+./target/release/archive2tape --db /srv/tape-archives/db/seqdata.db --log /srv/tape-archives/log/seqdata.log --create-db backup /data/seqdata
 ./target/release/archive2tape --db /srv/tape-archives/db/insitu-public.db --log /srv/tape-archives/log/insitu-public.log --create-db backup /data/insitu-public
 ./target/release/archive2tape --db /srv/tape-archives/db/insitu-production.db --log /srv/tape-archives/log/insitu-production.log --create-db backup /data/insitu-production
 
