@@ -2,7 +2,7 @@
 use std::os::unix::prelude::MetadataExt;
 use std::path::PathBuf;
 use std::io::{BufRead, BufReader, Write};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::os::unix::fs::PermissionsExt;
 
 use chrono::{TimeZone, Utc};
@@ -47,7 +47,7 @@ use format_bytes::format_bytes;
 // /dev/sg2 lto8 drive
 // /dev/sg4 lto8 loader
 
-// TODO: copy checksums, tape tags
+// TODO: tape tags
 // Checksums:
 // serial checksumming - done
 // set restore deduplication method --dedup-method copy, hardlink, symlink, reflink, hardlink-script, symlink-script, reflink-script --dedup-script-path --dedup-script-remap
@@ -55,7 +55,8 @@ use format_bytes::format_bytes;
 // backfill-checksums subcommand - done
 // validate-checksums subcommand - done
 // source_file_id -> is_duplicate - done
-// parallel checksumming --threads --skip-checksums flag for backup and restore
+// --threads --skip-checksums flag for backup and restore - done
+// parallel checksumming 
 
 #[derive(Parser, Debug)]
 #[command( about = "Perform a backup to tape")]
@@ -80,6 +81,8 @@ struct BackupCmd {
     nochecksums: bool,
     #[arg(long, help = "Number of threads to use when checksumming in parallel (default is all CPU cores)")]
     threads: Option<u64>,
+    #[arg(long, help = "Tape tag name pattern to match tape tags", name="TAG_NAME_PATTERN")]
+    tape_tag: Vec<Pattern>,
     #[arg(help = "Glob patterns to match files in filesystem", name="GLOB_PATTERN")]
     patterns: Vec<Pattern>,
 }
@@ -177,6 +180,24 @@ struct LoadTapeCmd {
 }
 
 #[derive(Parser, Debug)]
+#[command( about = "Add a tape tag to a tape")]
+struct AddTapeTagCmd {
+    #[arg(help = "The tag to add to the tape", name="TAG_NAME")]
+    tag_name: String,
+    #[arg(help = "The tape to add the tag to. Default is the current tape", name="TAPE_LABEL")]
+    tape_label: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+#[command( about = "Remove a tape tag from a tape")]
+struct RemoveTapeTagCmd {
+    #[arg(help = "The tag to remove from the tape", name="TAG_NAME")]
+    tag_name: String,
+    #[arg(help = "The tape to remove the tag from. Default is the current tape", name="TAPE_LABEL")]
+    tape_label: Option<String>,
+}
+
+#[derive(Parser, Debug)]
 #[command( about = "Format a tape using LTFS")]
 struct FormatLTFSCmd {
     #[arg(long, help = "Format tape even if it's alrady formatted?")]
@@ -184,10 +205,17 @@ struct FormatLTFSCmd {
 }
 
 #[derive(Parser, Debug)]
-#[command( about = "Format a tape using LTFS")]
+#[command( about = "Backfill missing checksums for all files in the database")]
 struct BackfillChecksumsCmd {
-    #[arg(long, help = "Restore path", name="RESTORE_PATH", default_value=".")]
+    #[arg(long, help = "Restore path used for checksumming", name="RESTORE_PATH", default_value=".")]
     restore_path: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+#[command( about = "Find and load a tape that is ready for writing")]
+struct ReadyStorageCmd {
+    #[arg(long, help = "Tape tag name pattern to match tape tags", name="TAG_NAME_PATTERN")]
+    tape_tag: Vec<Pattern>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -209,10 +237,11 @@ enum Command {
     #[command( about = "List all the tapes in the loader")]
     LoaderStatus,
     LoadTape(LoadTapeCmd),
+    AddTapeTag(AddTapeTagCmd),
+    RemoveTapeTag(RemoveTapeTagCmd),
     #[command( about = "Mount a tape using LTFS")]
     MountTape,
-    #[command( about = "Find and load a tape that is ready for writing")]
-    ReadyStorage,
+    ReadyStorage(ReadyStorageCmd),
     #[command( about = "Return the tape records from the sqlite database")]
     TapeStatus,
     #[command( about = "Unmount the LTFS volume")]
@@ -300,6 +329,12 @@ struct Tape {
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+struct TapeTag {
+    tape_id: i64,
+    tag: String,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct TapeStatus {
     label: String,
     is_full: Option<bool>,
@@ -307,6 +342,7 @@ struct TapeStatus {
     storage_type: Option<StorageType>,
     index: Option<usize>,
     storage_element_index: Option<usize>,
+    tags: String,
 }
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, PartialOrd, Ord, IntoPrimitive, TryFromPrimitive, Serialize, Deserialize)]
@@ -624,7 +660,7 @@ impl Options {
             debug!("connecting to tapes_db {tapes_db:?}");
             let conn = Connection::open(tapes_db)?;
 
-            let mut stmt = conn.prepare("select * from tape")?;
+            let mut stmt = conn.prepare("select * from tape order by id")?;
             let rows = stmt.query(params![])?;
             let mut rows_iter = serde_rusqlite::from_rows::<Tape>(rows);
             while let Some(tape) = rows_iter.next() {
@@ -634,6 +670,25 @@ impl Options {
         }
         debug!("Got tapes: {tapes:?}");
         Ok(tapes)
+    }
+
+    fn get_tape_tags(&self) -> Result<Vec<TapeTag>> {
+        debug!("Running get_tape_tags");
+        let mut tape_tags = Vec::<TapeTag>::new();
+        if let Some(tapes_db) = &self.tapes_db {
+            debug!("connecting to tapes_db {tapes_db:?}");
+            let conn = Connection::open(tapes_db)?;
+
+            let mut stmt = conn.prepare("select * from tape_tag order by id, tag_name")?;
+            let rows = stmt.query(params![])?;
+            let mut rows_iter = serde_rusqlite::from_rows::<TapeTag>(rows);
+            while let Some(tape_tag) = rows_iter.next() {
+                let tape_tag = tape_tag?;
+                tape_tags.push(tape_tag);
+            }
+        }
+        debug!("Got tape_tags: {tape_tags:?}");
+        Ok(tape_tags)
     }
 
     fn insert_tape_record(&self, label: &str) -> Result<Tape> {
@@ -794,6 +849,74 @@ impl Options {
         Ok(())
     }
 
+    fn add_tape_tag(&self, tag_name: &String, tape_label: &Option<String>) -> Result<()> {
+        debug!("Running add_tape_tag");
+        let ls = self.loader_status()?;
+        let drive_slot = ls.iter().
+            filter(|se| se.storage_type==StorageType::Drive).
+            next().ok_or(eyre!("Could not find drive slot"))?;
+        debug!("Found drive slot: {drive_slot:?}");
+        let tape_label = if let Some(tape_label) = tape_label {
+            tape_label.clone()
+        } else {
+            if let Some(drive_label) = &drive_slot.label {
+                drive_label.clone()
+            } else {
+                bail!("No tape label given and no tape loaded in drive");
+            }
+        };
+        let tapes = self.tape_status()?;
+        let label2tape = tapes.iter().map(|t| (t.label.clone(), t)).collect::<HashMap<_,_>>();
+        if let Some(tape) = label2tape.get(&tape_label) {
+            debug!("Found tape: {tape:?}");
+            if let Some(tapes_db) = &self.tapes_db {
+                let conn = Connection::open(tapes_db)?;
+                debug!("Inserting tape tag {tag_name} into tape_tags db");
+                conn.execute(r#"insert into tape_tag (tape_id,tag) values (?1,?2) on conflict(tape_id,tag) do nothing"#, params![tape.id, tag_name])?;
+            }
+            let conn = Connection::open(&self.db)?;
+            conn.execute(r#"insert into tape_tag (tape_id,tag) values (?1,?2) on conflict(tape_id,tag) do nothing"#, params![tape.id, tag_name])?;
+        }
+        else {
+            bail!("Could not find tape with label {tape_label}");
+        }
+        Ok(())
+    }
+
+    fn remove_tape_tag(&self, tag_name: &String, tape_label: &Option<String>) -> Result<()> {
+        debug!("Running remove_tape_tag");
+        let ls = self.loader_status()?;
+        let drive_slot = ls.iter().
+            filter(|se| se.storage_type==StorageType::Drive).
+            next().ok_or(eyre!("Could not find drive slot"))?;
+        debug!("Found drive slot: {drive_slot:?}");
+        let tape_label = if let Some(tape_label) = tape_label {
+            tape_label.clone()
+        } else {
+            if let Some(drive_label) = &drive_slot.label {
+                drive_label.clone()
+            } else {
+                bail!("No tape label given and no tape loaded in drive");
+            }
+        };
+        let tapes = self.tape_status()?;
+        let label2tape = tapes.iter().map(|t| (t.label.clone(), t)).collect::<HashMap<_,_>>();
+        if let Some(tape) = label2tape.get(&tape_label) {
+            debug!("Found tape: {tape:?}");
+            if let Some(tapes_db) = &self.tapes_db {
+                let conn = Connection::open(tapes_db)?;
+                debug!("Removing tape tag {tag_name} from tape_tags db");
+                conn.execute(r#"delete from tape_tag where tape_id=?1 and tag=?2"#, params![tape.id, tag_name])?;
+            }
+            let conn = Connection::open(&self.db)?;
+            conn.execute(r#"delete from tape_tag where tape_id=?1 and tag=?2"#, params![tape.id, tag_name])?;
+        }
+        else {
+            bail!("Could not find tape with label {tape_label}");
+        }
+        Ok(())
+    }
+
     fn mount_tape(&self) -> Result<()> {
         info!("Mounting current tape");
         if ! self.is_mounted()? {
@@ -844,7 +967,7 @@ impl Options {
         Ok(())
     }
 
-    fn ready_storage(&self) -> Result<StorageElement> {
+    fn ready_storage(&self, tape_tags: &Vec<Pattern>) -> Result<StorageElement> {
         debug!("Running ready_storage");
         // get loader status
         let ls = self.loader_status()?;
@@ -853,13 +976,13 @@ impl Options {
         // get list of full tapes we know about
         let full_tapes = ts.iter().
             filter(|t| t.is_full).
-            map(|t| t.label.clone()).collect::<HashSet<_>>();
+            map(|t| (t.label.clone(), t.clone())).collect::<HashMap<_,_>>();
         debug!("Got full tapes from db: {full_tapes:?}");
         // get list of non-full tapes we know about
         let non_full_tapes = ts.iter().
             filter(|t| !t.is_full).
-            map(|t| t.label.clone()).collect::<HashSet<_>>();
-        debug!("Got non-full tapes from db: {non_full_tapes:?}");
+            map(|t| (t.label.clone(), t.clone())).collect::<HashMap<_,_>>();
+        debug!("Got non-full tapes from db: {:?}", non_full_tapes.keys());
 
         // get list of potentially usable tapes
         let mut tapes = ls.iter().
@@ -869,10 +992,21 @@ impl Options {
                 if self.tapes.is_empty() {true} else {if let Some(label) = &se.label {self.tapes.contains(label)} else {true}}).
             collect::<Vec<_>>();
         tapes.sort_by_key(|t| 
-            (!(if let Some(label) = &t.label {non_full_tapes.contains(label)} else {false}), 
+            (!(if let Some(label) = &t.label {non_full_tapes.contains_key(label)} else {false}), 
             &t.storage_type,
             &t.index));
         debug!("Got usable tapes: {tapes:?}");
+
+        // get tape tags from database
+        let mut db_tape_tags= HashMap::<i64,Vec<String>>::new();
+        for tt in &self.get_tape_tags()? {
+            if let Some(tags) = db_tape_tags.get_mut(&tt.tape_id) {
+                tags.push(tt.tag.clone());
+            }
+            else {
+                db_tape_tags.insert(tt.tape_id, vec![tt.tag.clone()]);
+            }
+        }
 
         // find a tape to use
         debug!("Find a tape to use");
@@ -881,7 +1015,21 @@ impl Options {
             if tape.storage_type == StorageType::Drive || tape.storage_type == StorageType::Element {
                 if let Some(label) = &tape.label {
                     // if the tape is not marked as full
-                    if ! full_tapes.contains(label) && ! self.ignore_tape.is_match(label) {
+                    if let Some(t) = full_tapes.get(label) {
+                        if self.ignore_tape.is_match(label) {
+                            debug!("Ignoring tape: {tape:?}");
+                            continue;
+                        }
+                        if ! tape_tags.is_empty() {
+                            let mut tags = &Vec::<String>::new();
+                            if let Some(t) = db_tape_tags.get(&t.id) {
+                                tags = t;
+                            }
+                            if ! tape_tags.iter().any(|tag| tags.iter().any(|t| tag.matches(t))) {
+                                debug!("Tape {label:?} (tags: {tags:?}) does not match any tags: {tape_tags:?}");
+                                continue;
+                            }
+                        }
                         if tape.storage_type != StorageType::Drive {
                             // if ltfs filesystem is mounted
                             if self.is_mounted()? {
@@ -896,7 +1044,7 @@ impl Options {
 
                         // if no db record exists for tape, attempt to format the tape
                         // if tape is already formatted, formatting will fail
-                        if !non_full_tapes.contains(label) {
+                        if !non_full_tapes.contains_key(label) {
                             if ! self.is_mounted()? {
                                 debug!("Tape has no db record, try formatting it");
                                 self.format_ltfs()?;
@@ -963,7 +1111,11 @@ impl Options {
                     label text not null unique,
                     is_full integer default false not null,
                     date_added timestamp default current_timestamp not null
-                )
+                );
+                create table if not exists tape_tag (
+                    tape_id integer not null references tape(id),
+                    tag_name text not null
+                );
                 "#;
                 debug!("Running sql:\n{sql}\n");
                 conn.execute_batch(sql)?;
@@ -983,6 +1135,10 @@ impl Options {
                 label text not null unique,
                 is_full integer default false not null,
                 date_added timestamp default current_timestamp not null
+            );
+            create table if not exists tape_tag (
+                tape_id integer not null references tape(id),
+                tag_name text not null
             );
             create table if not exists backup (
                 id integer primary key autoincrement not null,
@@ -1018,7 +1174,7 @@ impl Options {
             debug!("Running sql:\n{sql}\n");
             conn.execute_batch(sql)?;
 
-            debug!("Transfer tapes_db tapes records to db tape table");
+            debug!("Transfer tapes_db tape and tape_tag records to db tape table");
             {
                 let tapes = self.tape_status()?;
                 let tx = conn.transaction()?;
@@ -1027,6 +1183,24 @@ impl Options {
                     for tape in &tapes {
                         debug!("Inserting tape record {tape:?}");
                         stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape, &["id","label","is_full","date_added"])?.to_slice().as_slice())?;
+                    }
+                    if let Some(tapes_db) = &self.tapes_db {
+                        let mut tape_tags = Vec::<TapeTag>::new();
+                        {
+                            let conn = Connection::open(tapes_db)?;
+                            let mut stmt = conn.prepare("select * from tape_tag")?;
+                            let rows = stmt.query(params![])?;
+                            let mut rows_iter = serde_rusqlite::from_rows::<TapeTag>(rows);
+                            while let Some(tape_tag) = rows_iter.next() {
+                                let tape_tag = tape_tag?;
+                                tape_tags.push(tape_tag);
+                            }
+                        }
+                        let mut stmt = tx.prepare(r#"insert into tape_tag (tape_id,tag) values (:tape_id,:tag) on conflict(tape_id,tag) do nothing"#)?;
+                        for tape_tag in &tape_tags {
+                            debug!("Inserting tape_tag record {tape_tag:?}");
+                            stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape_tag, &["tape_id","tag"])?.to_slice().as_slice())?;
+                        }
                     }
                 }
                 tx.commit()?;
@@ -1048,7 +1222,7 @@ impl Options {
         let conn = Connection::open(&self.db)?;
 
         let ls = self.loader_status()?;
-        let orig_tape = self.ready_storage()?;
+        let orig_tape = self.ready_storage(&vec![])?;
         let orig_tape_label = orig_tape.label.clone().ok_or(eyre!("Tape label is None!"))?;
         let mut current_tape_label = orig_tape_label.clone();
 
@@ -1166,7 +1340,7 @@ impl Options {
         let conn = Connection::open(&self.db)?;
 
         let ls = self.loader_status()?;
-        let orig_tape = self.ready_storage()?;
+        let orig_tape = self.ready_storage(&vec![])?;
         let orig_tape_label = orig_tape.label.clone().ok_or(eyre!("Tape label is None!"))?;
         let mut current_tape_label = orig_tape_label.clone();
 
@@ -1268,7 +1442,7 @@ impl Options {
 
         let mut tape = if ! backup_cmd.tape_full_test {
             // make sure a non-full tape is loaded, and create any missing tape db records
-            Some(self.ready_storage()?)
+            Some(self.ready_storage(&backup_cmd.tape_tag)?)
         }
         else {
             // if --tape-full-test was passed, operate on the current tape 
@@ -1512,7 +1686,7 @@ impl Options {
                                             info!("Verification complete, removed {count} files from the database", count=deleted_count);
 
                                             // load the new tape
-                                            tape = Some(self.ready_storage()?);
+                                            tape = Some(self.ready_storage(&backup_cmd.tape_tag)?);
 
                                             // update the tape db records
                                             tapes.clear();
@@ -3043,6 +3217,19 @@ impl Options {
         }
         debug!("got tapes records: {tapes:?}");
 
+        let mut tapeid2tags = HashMap::<i64,BTreeSet<String>>::new();
+        for tape_tag in self.get_tape_tags()? {
+            if let Some(tags) = tapeid2tags.get_mut(&tape_tag.tape_id) {
+                tags.insert(tape_tag.tag);
+            }
+            else {
+                let mut tags = BTreeSet::<String>::new();
+                tags.insert(tape_tag.tag);
+                tapeid2tags.insert(tape_tag.tape_id, tags);
+            }
+        }
+        debug!("tapeid2tags={tapeid2tags:?}");
+
         let ls = self.loader_status()?;
         let mut tape_labels = BTreeSet::<String>::new();
         let mut loader_statuses = HashMap::<String,StorageElement>::new();
@@ -3074,6 +3261,7 @@ impl Options {
                 storage_type: ls.map(|l| l.storage_type.clone()),
                 index: ls.map(|l| l.index),
                 storage_element_index: ls.map(|l| l.storage_element_index).flatten(),
+                tags: tapeid2tags.get(&tape.map(|t| t.id).unwrap_or(0)).cloned().unwrap_or_else(|| BTreeSet::<String>::new()).into_iter().collect::<Vec<String>>().join(" "),
             };
             debug!("ts={ts:?}");
             csv_writer.serialize(ts)?;
@@ -3126,8 +3314,10 @@ fn run(options: &mut Options) -> Result<()> {
         Some(Command::IsTapeFull) => info!("{:#?}", options.is_tape_full()?),
         Some(Command::LoaderStatus) => options.loader_status_view()?,
         Some(Command::LoadTape(load_tape_cmd)) => info!("{:#?}", options.load_tape(load_tape_cmd.slot)?),
+        Some(Command::AddTapeTag(add_tape_tag_cmd)) => info!("{:#?}", options.add_tape_tag(&add_tape_tag_cmd.tag_name, &add_tape_tag_cmd.tape_label)?),
+        Some(Command::RemoveTapeTag(remove_tape_tag_cmd)) => info!("{:#?}", options.remove_tape_tag(&remove_tape_tag_cmd.tag_name, &remove_tape_tag_cmd.tape_label)?),
         Some(Command::MountTape) => info!("{:#?}", options.mount_tape()?),
-        Some(Command::ReadyStorage) => info!("{:#?}", options.ready_storage()?),
+        Some(Command::ReadyStorage(ready_storage_cmd)) => info!("{:#?}", options.ready_storage(&ready_storage_cmd.tape_tag)?),
         Some(Command::TapeStatus) => {
             options.init_db()?;
             info!("{:#?}", options.tape_status()?);
