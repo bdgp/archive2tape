@@ -54,6 +54,7 @@ use format_bytes::format_bytes;
 // restore with deduplication - done
 // backfill-checksums subcommand - done
 // validate-checksums subcommand - done
+// source_file_id -> is_duplicate - done
 // parallel checksumming --threads --skip-checksums flag for backup and restore
 
 #[derive(Parser, Debug)]
@@ -182,6 +183,13 @@ struct FormatLTFSCmd {
     force: bool,
 }
 
+#[derive(Parser, Debug)]
+#[command( about = "Format a tape using LTFS")]
+struct BackfillChecksumsCmd {
+    #[arg(long, help = "Restore path", name="RESTORE_PATH", default_value=".")]
+    restore_path: PathBuf,
+}
+
 #[derive(Subcommand, Debug)]
 enum Command {
     Backup(BackupCmd),
@@ -191,9 +199,7 @@ enum Command {
     #[command( about = "List the status of all tapes in the db and loader")]
     ListTapes,
     FormatLTFS(FormatLTFSCmd),
-
-    #[command( about = "Backfill checksums for all files in the database")]
-    BackfillChecksums,
+    BackfillChecksums(BackfillChecksumsCmd),
     #[command( about = "Validate checksums for all files in the database")]
     ValidateChecksums,
     #[command( about = "Test if the LTFS filesystem is mounted")]
@@ -363,7 +369,7 @@ struct File {
     #[serde(deserialize_with = "option_pathbuf_deserialize")]
     symlink_target: Option<PathBuf>,
     checksum: Option<Vec<u8>>,
-    source_file_id: Option<i64>,
+    is_duplicate: bool,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
@@ -409,7 +415,7 @@ struct FullBackup {
     #[serde(deserialize_with = "option_pathbuf_deserialize")]
     symlink_target: Option<PathBuf>,
     checksum: Option<Vec<u8>>,
-    source_file_id: Option<i64>,
+    is_duplicate: bool,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
@@ -430,7 +436,7 @@ struct NewFile {
     #[serde(deserialize_with = "option_pathbuf_deserialize")]
     symlink_target: Option<PathBuf>,
     checksum: Option<Vec<u8>>,
-    source_file_id: Option<i64>,
+    is_duplicate: bool,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
@@ -995,10 +1001,9 @@ impl Options {
                 symlink_target text
             );
             alter table file add column if not exists checksum blob;
-            alter table file add column if not exists source_file_id integer references file(id);
+            alter table file add column if not exists is_duplicate integer not null default false;
             create index if not exists file_path_mtime_size_idx on file (path,mtime,size,filetype);
             create index if not exists file_checksum_idx on file (checksum);
-            create index if not exists file_source_file_id_idx on file (source_file_id);
             create table if not exists backup2file (
                 backup_id integer not null references backup(id),
                 file_id integer not null references file(id),
@@ -1032,6 +1037,11 @@ impl Options {
 
     fn backfill_checksums(&mut self) -> Result<()> {
         debug!("Called backfill_checksums");
+        let restore_path = match &self.cmd {
+            Some(Command::BackfillChecksums(b)) => b.restore_path.clone(),
+            _ => PathBuf::from("."),
+        };
+
         // initialize the backup set's sqlite database
         self.init_db()?;
         debug!("Connecting to db {db:?}", db=self.db);
@@ -1048,14 +1058,16 @@ impl Options {
           f.id as file_id,
           b.date_created as backup_date_created,
           b.uuid as backup_uuid,
-          f.path as file_path
+          f.path as file_path,
+          f.size as file_size,
+          f.mtime as file_mtime
         from file f, backup2file b2f, tape t, backup b
         where b2f.file_id=f.id
           and b2f.tape_id=t.id
           and b2f.backup_id=b.id
           and f.filetype=?1
           and f.checksum is null 
-          and f.source_file_id is null
+          and not f.is_duplicate
         order by t.id, f.id
         "#;
         debug!("Running sql query:\n{sql}\n");
@@ -1068,6 +1080,29 @@ impl Options {
             let backup_date_created: i64 = row.get(3)?;
             let backup_uuid: String = row.get(4)?;
             let file_path: String = row.get(5)?;
+            let file_path = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&file_path)?));
+            let file_size: u64 = row.get(6)?;
+            let file_mtime: i64 = row.get(7)?;
+
+            // see if file exists unchanged on destination. 
+            // If so we can skip reading from tape.
+            let file_path_strip_prefix = file_path.strip_prefix("/").unwrap_or_else(|_| file_path.as_path());
+            let path = [
+                &restore_path,
+                file_path_strip_prefix,
+            ].iter().collect::<PathBuf>();
+            let metadata = path.metadata()?;
+            if path.exists() && path.is_file() && !path.is_symlink() && metadata.mtime() == file_mtime && metadata.size() == file_size {
+                let mut hasher = Sha256::new();
+                let mut file = std::fs::File::open(&path)?;
+                let _ = std::io::copy(&mut file, &mut hasher)?;
+                let hash_bytes = hasher.finalize();
+                let checksum = Vec::from(hash_bytes.as_slice());
+
+                info!("Updating file {file_path:?} with checksum {checksum} from storage at {restore_path:?}", checksum=hex::encode(&checksum));
+                conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
+                continue;
+            }
 
             // change tape
             if current_tape_label != tape_label {
@@ -1078,7 +1113,7 @@ impl Options {
                     current_tape_label = tape_label.clone();
                 }
                 else {
-                    info!("Tape {tape_label} not found in loader, skipping file {file_path}");
+                    info!("Tape {tape_label} not found in loader, skipping file {file_path:?}");
                 }
             }
             if current_tape_label == tape_label {
@@ -1103,7 +1138,7 @@ impl Options {
                         let hash_bytes = hasher.finalize();
                         let checksum = Vec::from(hash_bytes.as_slice());
 
-                        info!("Updating file {file_path} with checksum {checksum}", file_path=file_path, checksum=hex::encode(&checksum));
+                        info!("Updating file {file_path:?} with checksum {checksum} from tape {tape_label}", checksum=hex::encode(&checksum));
                         conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
                     }
                     else {
@@ -1148,7 +1183,7 @@ impl Options {
           and b2f.backup_id=b.id
           and f.filetype=?1
           and f.checksum is not null
-          and f.source_file_id is null
+          and not f.is_duplicate
         order by t.id, f.id
         "#;
         debug!("Running sql query:\n{sql}\n");
@@ -1285,7 +1320,7 @@ impl Options {
                   from backup b
                   join parent_backup pb 
                     on pb.parent_backup_id = b.id) 
-                select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path as source_path, f.mtime as source_mtime, f.path as dest_path, f.mtime, f.size, f.filetype, f.symlink_target, f.checksum, f.source_file_id
+                select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path as source_path, f.mtime as source_mtime, f.path as dest_path, f.mtime, f.size, f.filetype, f.symlink_target, f.checksum, f.is_duplicate
                 from (parent_backup pb
                   join backup2file b2f
                     on b2f.backup_id = pb.id
@@ -1384,7 +1419,7 @@ impl Options {
                                             let mut deleted_count = 0u64;
                                             if let Some(backup) = &backup {
                                                 let sql = r#"
-                                                select f.id, f.path, f.mtime, f.size, b2f.uid, b2f.gid, b2f.mode, f.filetype, f.symlink_target, f.checksum, f.source_file_id
+                                                select f.id, f.path, f.mtime, f.size, b2f.uid, b2f.gid, b2f.mode, f.filetype, f.symlink_target, f.checksum, f.is_duplicate
                                                 from backup2file b2f
                                                 join file f
                                                 on b2f.file_id=f.id
@@ -1665,7 +1700,7 @@ impl Options {
                                         }
 
                                         let mut checksum = Option::<Vec<u8>>::None;
-                                        let mut source_file_id = Option::<i64>::None;
+                                        let mut is_duplicate = false;
 
                                         // handle file types
                                         match filetype {
@@ -1739,7 +1774,7 @@ impl Options {
                                                 // copy file to temp path first
                                                 trace!("is a file");
 
-                                                // compute file checksum, find a candidate source_file_id, set a placeholder symlink on tape
+                                                // compute file checksum, find a candidate contents file, set a placeholder symlink on tape
                                                 if !backup_cmd.nochecksums {
                                                     let mut hasher = Sha256::new();
                                                     let mut file = std::fs::File::open(&path)?;
@@ -1752,17 +1787,17 @@ impl Options {
                                                         select distinct f.id, f.path, t.label, b.date_created, b.uuid 
                                                         from file f, backup2file b2f, tape t, backup b 
                                                         where f.id=b2f.file_id 
-                                                        and b2f.tape_id=t.id 
-                                                        and b2f.backup_id=b.id 
-                                                        and f.source_file_id is null 
-                                                        and f.checksum=?1 
+                                                          and b2f.tape_id=t.id 
+                                                          and b2f.backup_id=b.id 
+                                                          and not f.is_duplicate
+                                                          and f.checksum=?1 
                                                         order by t.label, f.id 
                                                         limit 1"#;
                                                         debug!("Running query: {sql}");
                                                         let mut stmt = conn.prepare(sql)?;
                                                         let mut rows = stmt.query([hash_bytes.as_slice()])?;
                                                         if let Some(row) = rows.next()? {
-                                                            source_file_id = Some(row.get(0)?);
+                                                            let _source_file_id: i64 = row.get(0)?;
                                                             let source_file_path: String = row.get(1)?;
                                                             let tape_label: String = row.get(2)?;
                                                             let date_created: i64 = row.get(3)?;
@@ -1796,12 +1831,13 @@ impl Options {
                                                                     }
                                                                 }
                                                             }
+                                                            is_duplicate = true;
                                                             trace!("{file_path:?} is deduplicated with {target:?}");
                                                         }
                                                     }
                                                 }
 
-                                                if source_file_id.is_none() {
+                                                if ! is_duplicate {
                                                     let randext = rand::thread_rng()
                                                         .sample_iter(&Alphanumeric)
                                                         .take(10)
@@ -1882,7 +1918,7 @@ impl Options {
                                             let tx = conn.transaction()?;
 
                                             if let (Some(backup), Some(tape_record)) = (&backup, &tape_record) {
-                                                let sql = r#"insert into file (tape_id,path,mtime,size,filetype,symlink_target,checksum,source_file_id) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target,:checksum,:source_file_id) returning *"#;
+                                                let sql = r#"insert into file (tape_id,path,mtime,size,filetype,symlink_target,checksum,is_duplicate) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target,:checksum,:is_duplicate) returning *"#;
                                                 let file = File{
                                                     id: 0,
                                                     tape_id: tape_record.id,
@@ -1892,12 +1928,12 @@ impl Options {
                                                     filetype,
                                                     symlink_target: target,
                                                     checksum,
-                                                    source_file_id,
+                                                    is_duplicate,
                                                 };
                                                 trace!("Running sql:\n{sql}\nto insert file {file:?}");
                                                 let mut file_stmt = tx.prepare(sql)?;
                                                 // write file and backup2file db records
-                                                let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(&file, &["tape_id","path","mtime","size","filetype","symlink_target","checksum","source_file_id"])?.to_slice().as_slice())?;
+                                                let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(&file, &["tape_id","path","mtime","size","filetype","symlink_target","checksum","is_duplicate"])?.to_slice().as_slice())?;
 
                                                 let mut rows_iter = serde_rusqlite::from_rows::<File>(rows);
                                                 if let Some(file_record) = rows_iter.next() {
@@ -2096,7 +2132,11 @@ impl Options {
             // get the complete list of fullbackup file records from the db
             // the metadata is in the most recent backup2file for each file
             // but the contents on tape are in the oldest backup2file for each file, or
-            // the contents are deduplicated through source_file_id or checksum
+            // the contents are deduplicated through checksum
+            let ls = self.loader_status()?;
+            let drive_tape = ls.iter().filter(|t| t.storage_type == StorageType::Drive && t.status == StorageStatus::Full).map(|t| t.clone()).next().map(|t| t.label).unwrap_or(None);
+            let loaded_tapes = ls.iter().filter(|t| t.status == StorageStatus::Full).flat_map(|t| t.label.clone()).collect::<Vec<String>>();
+
             let sql = r#"
               with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
               select id, date_created, uuid, parent_backup_id, 0 as depth
@@ -2107,53 +2147,47 @@ impl Options {
               from backup b
               join parent_backup pb 
                 on pb.parent_backup_id = b.id) 
-              select backup_id, 
-                uid, 
-                gid, 
-                mode, 
-                is_deleted, 
-                file_id, 
-                tape_id, 
-                source_path, 
-                dest_path, 
-                source_mtime,
-                mtime, 
-                size, 
-                filetype, 
-                symlink_target, 
-                checksum
+              select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, source_path, dest_path, source_mtime, mtime, size, filetype, symlink_target, checksum
               from (
-                select b2f2.backup_id, 
-                  b2f.uid, 
-                  b2f.gid, 
-                  b2f.mode, 
-                  b2f.is_deleted, 
-                  f2.id as file_id,
-                  f2.tape_id as tape_id, 
-                  f2.path as source_path, 
-                  f.path as dest_path, 
-                  f2.mtime as source_mtime,
-                  f.mtime, 
-                  f2.size, 
-                  f.filetype, 
-                  f.symlink_target, 
-                  f2.checksum, 
-                  pb.depth,
-                  pb2.depth as depth2,
-                  (f.source_file_id=f2.id) as is_source_file,
-                  row_number() over (partition by f.path order by pb.depth, (f.source_file_id=f2.id) desc, pb2.depth desc) as rank
+                select b2f2.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, f2.id as file_id, f2.tape_id as tape_id, f2.path as source_path, f.path as dest_path, f2.mtime as source_mtime, f.mtime, f2.size, f.filetype, f.symlink_target, f2.checksum, 
+                pb.depth, 
+                (not f2.is_duplicate) as non_duplicate, 
+                (f.id=f2.id) as original_file,
+                (t.label=?2) as drive_tape,
+                (t.label in ("#.to_string()+
+                &loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+3)).collect::<Vec<String>>().join(",")+
+                r#") as loaded_tape,
+                pb2.depth as depth2, 
+                row_number() over (
+                    partition by f.path 
+                    order by pb.depth -- get most recent backup2file record for file metadata
+                ) as metadata_rank,
+                row_number() over (
+                    partition by f.path 
+                    order by (not f2.is_duplicate) desc, -- prefer non-duplicate contents records
+                        (f.id=f2.id) desc, -- prefer original contents record
+                        (t.label=?2) desc, -- prefer contents in current drive tape
+                        (t.label in ("#+
+                        &loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+3)).collect::<Vec<String>>().join(",")+
+                        r#") desc, -- prefer contents in loaded tapes
+                        pb2.depth desc -- prefer oldest backup2file record for file contents
+                    ) as contents_rank
                 from parent_backup pb
                 join backup2file b2f
                   on b2f.backup_id=pb.id
                 join file f
                   on f.id=b2f.file_id
                 join file f2
-                  on f2.id in (f.id, f.source_file_id)
+                  on f2.id=f.id -- file contents can come from the metadata files
+                  or (f2.checksum=f.checksum and not f2.is_duplicate) -- or from deduplicated contents
+                join tape t2
+                  on t2.id=f2.tape_id
                 join backup2file b2f2
                   on b2f2.file_id=f2.id
                 join parent_backup pb2
                   on pb2.id=b2f2.backup_id) s
-              where rank=1
+              where metadata_rank=1
+                and contents_rank=1
               order by tape_id, file_id
             "#;
             debug!("Running sql query:\n{sql}\n");
@@ -2162,8 +2196,14 @@ impl Options {
             let mut old_tape_id = Option::<i64>::None;
             let mut old_dir = Vec::<(PathBuf, i64)>::new();
             {
-                let mut stmt = conn.prepare(sql)?;
-                let rows = stmt.query([&backup.id])?;
+                let mut stmt = conn.prepare(&sql)?;
+                let mut param_values  = Vec::<rusqlite::types::Value>::new();
+                param_values.push(backup.id.into());
+                param_values.push(drive_tape.into());
+                for loaded_tape in loaded_tapes {
+                    param_values.push(loaded_tape.into());
+                }
+                let rows = stmt.query(rusqlite::params_from_iter(param_values))?;
                 let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
                 while let Some(full_backup) = rows_iter.next() {
                     let full_backup = full_backup?;
@@ -2864,10 +2904,10 @@ impl Options {
               from backup b
               join parent_backup pb 
                 on pb.parent_backup_id = b.id) 
-              select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, path as source_path, mtime as source_mtime, path as dest_path, mtime, size, filetype, symlink_target, checksum, source_file_id
+              select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, path as source_path, mtime as source_mtime, path as dest_path, mtime, size, filetype, symlink_target, checksum, is_duplicate
               from (
                 select b2f.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, b2f.file_id, f.tape_id, f.path, f.mtime, f.size, f.filetype, f.symlink_target, 
-                  f.id as file_id, f.checksum, f.source_file_id, pb.depth,
+                  f.id as file_id, f.checksum, f.is_duplicate, pb.depth,
                   row_number() over (partition by f.path order by pb.depth) as rank
                 from parent_backup pb
                 join backup2file b2f
@@ -3095,7 +3135,7 @@ fn run(options: &mut Options) -> Result<()> {
         Some(Command::UnmountTape) => info!("{:#?}", options.unmount_tape()?),
         Some(Command::WaitForDrive) => info!("{:#?}", options.wait_for_drive()?),
         Some(Command::WaitForLTFSProcessToTerminate) => info!("{:#?}", options.wait_for_ltfs_process_to_terminate()?),
-        Some(Command::BackfillChecksums) => info!("{:#?}", options.backfill_checksums()?),
+        Some(Command::BackfillChecksums(_)) => info!("{:#?}", options.backfill_checksums()?),
         Some(Command::ValidateChecksums) => info!("{:#?}", options.validate_checksums()?),
         _ => {
             Options::command().print_long_help()?;
