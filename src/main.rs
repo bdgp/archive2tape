@@ -47,7 +47,6 @@ use format_bytes::format_bytes;
 // /dev/sg2 lto8 drive
 // /dev/sg4 lto8 loader
 
-// TODO: tape tags
 // Checksums:
 // serial checksumming - done
 // set restore deduplication method --dedup-method copy, hardlink, symlink, reflink, hardlink-script, symlink-script, reflink-script --dedup-script-path --dedup-script-remap
@@ -56,6 +55,7 @@ use format_bytes::format_bytes;
 // validate-checksums subcommand - done
 // source_file_id -> is_duplicate - done
 // --threads --skip-checksums flag for backup and restore - done
+// tape tags - done
 // parallel checksumming 
 
 #[derive(Parser, Debug)]
@@ -1965,7 +1965,7 @@ impl Options {
                                                           and b2f.backup_id=b.id 
                                                           and not f.is_duplicate
                                                           and f.checksum=?1 
-                                                        order by t.label, f.id 
+                                                        order by t.id, f.id 
                                                         limit 1"#;
                                                         debug!("Running query: {sql}");
                                                         let mut stmt = conn.prepare(sql)?;
@@ -2017,12 +2017,7 @@ impl Options {
                                                         .take(10)
                                                         .map(char::from)
                                                         .collect::<String>();
-                                                    let mut tmp_file_name = Vec::<u8>::new();
-                                                    tmp_file_name.extend(b".");
-                                                    tmp_file_name.extend(file_name.as_bytes());
-                                                    tmp_file_name.extend(b".");
-                                                    tmp_file_name.extend(randext.as_bytes());
-                                                    let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
+                                                    let tmp_file_name = PathBuf::from(OsString::from_vec(format_bytes!(b".{}.{}", file_name.as_bytes(), randext.as_bytes())));
                                                     trace!("tmp_file_name={tmp_file_name:?}");
 
                                                     let tmp_file = PathBuf::from(stfu8::encode_u8_pretty([
@@ -2761,12 +2756,7 @@ impl Options {
                                                 .take(10)
                                                 .map(char::from)
                                                 .collect::<String>();
-                                            let mut tmp_file_name = Vec::<u8>::new();
-                                            tmp_file_name.extend(b".");
-                                            tmp_file_name.extend(file_name.as_bytes());
-                                            tmp_file_name.extend(b".");
-                                            tmp_file_name.extend(randext.as_bytes());
-                                            let tmp_file_name = PathBuf::from(OsString::from_vec(tmp_file_name));
+                                            let tmp_file_name = PathBuf::from(OsString::from_vec(format_bytes!(b".{}.{}", file_name.as_bytes(), randext.as_bytes())));
                                             let tmp_file = [
                                                 &PathBuf::from(dest_path), 
                                                 &tmp_file_name,
