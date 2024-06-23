@@ -1257,11 +1257,13 @@ impl Options {
             ].iter().collect::<PathBuf>();
             let metadata = path.metadata()?;
             if path.exists() && path.is_file() && !path.is_symlink() && metadata.mtime() == file_mtime && metadata.size() == file_size {
+                info!("Computing checksum for {path:?} ... ");
                 let mut hasher = Sha256::new();
                 let mut file = std::fs::File::open(&path)?;
                 let _ = std::io::copy(&mut file, &mut hasher)?;
                 let hash_bytes = hasher.finalize();
                 let checksum = Vec::from(hash_bytes.as_slice());
+                info!("\rComputing checksum for {path:?} ... {checksum}", checksum=hex::encode(&checksum));
 
                 info!("Updating file {file_path:?} with checksum {checksum} from storage at {restore_path:?}", checksum=hex::encode(&checksum));
                 conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
@@ -1291,11 +1293,13 @@ impl Options {
                     ].iter().collect::<PathBuf>();
                     if source.exists() {
                         if source.is_file() {
+                            info!("Computing checksum for {source:?} ... ");
                             let mut hasher = Sha256::new();
                             let mut file = std::fs::File::open(&source)?;
                             let _ = std::io::copy(&mut file, &mut hasher)?;
                             let hash_bytes = hasher.finalize();
                             let checksum = Vec::from(hash_bytes.as_slice());
+                            info!("\rComputing checksum for {source:?} ... {checksum}", checksum=hex::encode(&checksum));
 
                             info!("Updating file {file_path:?} with checksum {checksum} from tape {tape_label}", checksum=hex::encode(&checksum));
                             conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
@@ -1385,11 +1389,13 @@ impl Options {
                     ].iter().collect::<PathBuf>();
                     if source.exists() {
                         if source.is_file() {
+                            info!("Computing checksum for {source:?} ... ");
                             let mut hasher = Sha256::new();
                             let mut file = std::fs::File::open(&source)?;
                             let _ = std::io::copy(&mut file, &mut hasher)?;
                             let hash_bytes = hasher.finalize();
                             let source_checksum = Vec::from(hash_bytes.as_slice());
+                            info!("\rComputing checksum for {source:?} ... {checksum}", checksum=hex::encode(&source_checksum));
                             if source_checksum != checksum {
                                 error!("Checksum mismatch for file {file_path}, expected {checksum}, got {source_checksum}",
                                 checksum=hex::encode(&checksum), 
@@ -1962,12 +1968,15 @@ impl Options {
 
                                                 // compute file checksum, find a candidate contents file, set a placeholder symlink on tape, if tape is full, load new tape
                                                 if !backup_cmd.nochecksums {
+                                                    info!("Computing checksum for {path:?} ... ");
                                                     let mut hasher = Sha256::new();
                                                     let mut file = std::fs::File::open(&path)?;
                                                     let _ = std::io::copy(&mut file, &mut hasher)?;
                                                     let hash_bytes = hasher.finalize();
                                                     checksum = Some(Vec::from(hash_bytes.as_slice()));
-
+                                                    if let Some(checksum) = &checksum {
+                                                        info!("\rComputing checksum for {path:?} ... {checksum}", checksum=hex::encode(&checksum));
+                                                    }
                                                     if metadata.size() >= backup_cmd.min_dedup_size {
                                                         let sql = r#"
                                                         select distinct f.id, f.path, t.label, b.date_created, b.uuid 
