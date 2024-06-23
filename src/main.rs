@@ -335,7 +335,7 @@ struct Tape {
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 struct TapeTag {
     tape_id: i64,
-    tag: String,
+    tag_name: String,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
@@ -703,7 +703,7 @@ impl Options {
             debug!("connecting to tapes_db {tapes_db:?}");
             let conn = Connection::open(tapes_db)?;
 
-            let mut stmt = conn.prepare("select * from tape_tag order by id, tag_name")?;
+            let mut stmt = conn.prepare("select * from tape_tag order by tape_id, tag_name")?;
             let rows = stmt.query(params![])?;
             let mut rows_iter = serde_rusqlite::from_rows::<TapeTag>(rows);
             while let Some(tape_tag) = rows_iter.next() {
@@ -909,10 +909,10 @@ impl Options {
             if let Some(tapes_db) = &self.tapes_db {
                 let conn = Connection::open(tapes_db)?;
                 debug!("Inserting tape tag {tag_name} into tape_tags db");
-                conn.execute(r#"insert into tape_tag (tape_id,tag) values (?1,?2) on conflict(tape_id,tag) do nothing"#, params![tape.id, tag_name])?;
+                conn.execute(r#"insert into tape_tag (tape_id,tag_name) values (?1,?2) on conflict(tape_id,tag_name) do nothing"#, params![tape.id, tag_name])?;
             }
             let conn = Connection::open(&self.db)?;
-            conn.execute(r#"insert into tape_tag (tape_id,tag) values (?1,?2) on conflict(tape_id,tag) do nothing"#, params![tape.id, tag_name])?;
+            conn.execute(r#"insert into tape_tag (tape_id,tag_name) values (?1,?2) on conflict(tape_id,tag_name) do nothing"#, params![tape.id, tag_name])?;
         }
         else {
             bail!("Could not find tape with label {tape_label}");
@@ -943,10 +943,10 @@ impl Options {
             if let Some(tapes_db) = &self.tapes_db {
                 let conn = Connection::open(tapes_db)?;
                 debug!("Removing tape tag {tag_name} from tape_tags db");
-                conn.execute(r#"delete from tape_tag where tape_id=?1 and tag=?2"#, params![tape.id, tag_name])?;
+                conn.execute(r#"delete from tape_tag where tape_id=?1 and tag_name=?2"#, params![tape.id, tag_name])?;
             }
             let conn = Connection::open(&self.db)?;
-            conn.execute(r#"delete from tape_tag where tape_id=?1 and tag=?2"#, params![tape.id, tag_name])?;
+            conn.execute(r#"delete from tape_tag where tape_id=?1 and tag_name=?2"#, params![tape.id, tag_name])?;
         }
         else {
             bail!("Could not find tape with label {tape_label}");
@@ -1054,10 +1054,10 @@ impl Options {
         let mut db_tape_tags= HashMap::<i64,Vec<String>>::new();
         for tt in &self.get_tape_tags()? {
             if let Some(tags) = db_tape_tags.get_mut(&tt.tape_id) {
-                tags.push(tt.tag.clone());
+                tags.push(tt.tag_name.clone());
             }
             else {
-                db_tape_tags.insert(tt.tape_id, vec![tt.tag.clone()]);
+                db_tape_tags.insert(tt.tape_id, vec![tt.tag_name.clone()]);
             }
         }
 
@@ -1171,6 +1171,7 @@ impl Options {
                     tape_id integer not null references tape(id),
                     tag_name text not null
                 );
+                create unique index if not exists tape_tag_tape_id_tag_name_unique_idx ON tape_tag(tape_id,tag_name);
                 "#;
                 debug!("Running sql:\n{sql}\n");
                 conn.execute_batch(sql)?;
@@ -1195,6 +1196,7 @@ impl Options {
                 tape_id integer not null references tape(id),
                 tag_name text not null
             );
+            create unique index if not exists tape_tag_tape_id_tag_name_unique_idx ON tape_tag(tape_id,tag_name);
             create table if not exists backup (
                 id integer primary key autoincrement not null,
                 date_created integer default (unixepoch()) not null,
@@ -1211,10 +1213,7 @@ impl Options {
                 filetype integer not null,
                 symlink_target text
             );
-            alter table file add column if not exists checksum blob;
-            alter table file add column if not exists is_duplicate integer not null default false;
             create index if not exists file_path_mtime_size_idx on file (path,mtime,size,filetype);
-            create index if not exists file_checksum_idx on file (checksum);
             create table if not exists backup2file (
                 backup_id integer not null references backup(id),
                 file_id integer not null references file(id),
@@ -1229,6 +1228,25 @@ impl Options {
             debug!("Running sql:\n{sql}\n");
             conn.execute_batch(sql)?;
 
+            let sql = r#"alter table file add column checksum blob"#;
+            debug!("Running sql:\n{sql}\n");
+            if let Err(e) = conn.execute_batch(sql) {
+                if !regex_is_match!(r#"duplicate column name: checksum"#i, &e.to_string()) {
+                    bail!(e);
+                }
+            }
+            let sql = r#"create index if not exists file_checksum_idx on file (checksum)"#;
+            debug!("Running sql:\n{sql}\n");
+            conn.execute_batch(sql)?;
+
+            let sql = r#"alter table file add column is_duplicate integer not null default false"#;
+            debug!("Running sql:\n{sql}\n");
+            if let Err(e) = conn.execute_batch(sql) {
+                if !regex_is_match!(r#"duplicate column name: is_duplicate"#i, &e.to_string()) {
+                    bail!(e);
+                }
+            }
+
             debug!("Transfer tapes_db tape and tape_tag records to db tape table");
             {
                 let tapes = self.tape_status()?;
@@ -1240,10 +1258,10 @@ impl Options {
                         debug!("Inserting tape record {tape:?}");
                         stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape, &["id","label","is_full","date_added"])?.to_slice().as_slice())?;
                     }
-                    let mut stmt = tx.prepare(r#"insert into tape_tag (tape_id,tag) values (:tape_id,:tag) on conflict(tape_id,tag) do nothing"#)?;
+                    let mut stmt = tx.prepare(r#"insert into tape_tag (tape_id,tag_name) values (:tape_id,:tag_name) on conflict(tape_id,tag_name) do nothing"#)?;
                     for tape_tag in &tape_tags {
                         debug!("Inserting tape_tag record {tape_tag:?}");
-                        stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape_tag, &["tape_id","tag"])?.to_slice().as_slice())?;
+                        stmt.execute(serde_rusqlite::to_params_named_with_fields(&tape_tag, &["tape_id","tag_name"])?.to_slice().as_slice())?;
                     }
                 }
                 tx.commit()?;
@@ -3337,11 +3355,11 @@ impl Options {
         let mut tapeid2tags = HashMap::<i64,BTreeSet<String>>::new();
         for tape_tag in self.get_tape_tags()? {
             if let Some(tags) = tapeid2tags.get_mut(&tape_tag.tape_id) {
-                tags.insert(tape_tag.tag);
+                tags.insert(tape_tag.tag_name);
             }
             else {
                 let mut tags = BTreeSet::<String>::new();
-                tags.insert(tape_tag.tag);
+                tags.insert(tape_tag.tag_name);
                 tapeid2tags.insert(tape_tag.tape_id, tags);
             }
         }
@@ -3371,6 +3389,14 @@ impl Options {
             debug!("tape={tape:?}");
             let ls = loader_statuses.get(label);
             debug!("ls={ls:?}");
+            // write a space-delimited csv string of all the tags with proper quoting
+            let tags = tapeid2tags.get(&tape.map(|t| t.id).unwrap_or(0)).cloned().unwrap_or_else(|| BTreeSet::<String>::new()).into_iter().collect::<Vec<String>>();
+            let mut wtr = csv::WriterBuilder::new().
+                delimiter(b' ').
+                quote_style(csv::QuoteStyle::Necessary).
+                from_writer(vec![]);
+            wtr.write_record(&tags)?;
+            wtr.flush()?;
             let ts = TapeStatus {
                 label: label.clone(),
                 is_full: tape.map(|t| t.is_full),
@@ -3378,7 +3404,7 @@ impl Options {
                 storage_type: ls.map(|l| l.storage_type.clone()),
                 index: ls.map(|l| l.index),
                 storage_element_index: ls.map(|l| l.storage_element_index).flatten(),
-                tags: tapeid2tags.get(&tape.map(|t| t.id).unwrap_or(0)).cloned().unwrap_or_else(|| BTreeSet::<String>::new()).into_iter().collect::<Vec<String>>().join(" "),
+                tags: if tags.is_empty() {"".to_string()} else {String::from_utf8(wtr.into_inner()?)?.trim_end_matches('\n').to_string()},
             };
             debug!("ts={ts:?}");
             csv_writer.serialize(ts)?;
