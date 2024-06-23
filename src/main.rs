@@ -1263,7 +1263,7 @@ impl Options {
                 let _ = std::io::copy(&mut file, &mut hasher)?;
                 let hash_bytes = hasher.finalize();
                 let checksum = Vec::from(hash_bytes.as_slice());
-                info!("Computing checksum for {path:?} ... {checksum}", checksum=hex::encode(&checksum));
+                info!("Computed checksum for {path:?} ... {checksum}", checksum=hex::encode(&checksum));
 
                 info!("Updating file {file_path:?} with checksum {checksum} from storage at {restore_path:?}", checksum=hex::encode(&checksum));
                 conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
@@ -1299,7 +1299,7 @@ impl Options {
                             let _ = std::io::copy(&mut file, &mut hasher)?;
                             let hash_bytes = hasher.finalize();
                             let checksum = Vec::from(hash_bytes.as_slice());
-                            info!("Computing checksum for {source:?} ... {checksum}", checksum=hex::encode(&checksum));
+                            info!("Computed checksum for {source:?} ... {checksum}", checksum=hex::encode(&checksum));
 
                             info!("Updating file {file_path:?} with checksum {checksum} from tape {tape_label}", checksum=hex::encode(&checksum));
                             conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
@@ -1395,7 +1395,7 @@ impl Options {
                             let _ = std::io::copy(&mut file, &mut hasher)?;
                             let hash_bytes = hasher.finalize();
                             let source_checksum = Vec::from(hash_bytes.as_slice());
-                            info!("Computing checksum for {source:?} ... {checksum}", checksum=hex::encode(&source_checksum));
+                            info!("Computed checksum for {source:?} ... {checksum}", checksum=hex::encode(&source_checksum));
                             if source_checksum != checksum {
                                 error!("Checksum mismatch for file {file_path}, expected {checksum}, got {source_checksum}",
                                 checksum=hex::encode(&checksum), 
@@ -1975,7 +1975,7 @@ impl Options {
                                                     let hash_bytes = hasher.finalize();
                                                     checksum = Some(Vec::from(hash_bytes.as_slice()));
                                                     if let Some(checksum) = &checksum {
-                                                        info!("Computing checksum for {path:?} ... {checksum}", checksum=hex::encode(&checksum));
+                                                        info!("Computed checksum for {path:?} ... {checksum}", checksum=hex::encode(&checksum));
                                                     }
                                                     if metadata.size() >= backup_cmd.min_dedup_size {
                                                         let sql = r#"
