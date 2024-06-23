@@ -2426,7 +2426,7 @@ impl Options {
             let drive_tape = ls.iter().filter(|t| t.storage_type == StorageType::Drive && t.status == StorageStatus::Full).map(|t| t.clone()).next().map(|t| t.label).unwrap_or(None);
             let loaded_tapes = ls.iter().filter(|t| t.status == StorageStatus::Full).flat_map(|t| t.label.clone()).collect::<Vec<String>>();
 
-            let sql = r#"
+            let sql = format!(r#"
               with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
               select id, date_created, uuid, parent_backup_id, 0 as depth
               from backup
@@ -2443,9 +2443,7 @@ impl Options {
                 (not f2.is_duplicate) as non_duplicate, 
                 (f.id=f2.id) as original_file,
                 (t.label=?2) as drive_tape,
-                (t.label in ("#.to_string()+
-                &loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+3)).collect::<Vec<String>>().join(",")+
-                r#") as loaded_tape,
+                (t.label in ({loaded_tapes}) as loaded_tape,
                 pb2.depth as depth2, 
                 row_number() over (
                     partition by f.path 
@@ -2456,9 +2454,7 @@ impl Options {
                     order by (not f2.is_duplicate) desc, -- prefer non-duplicate contents records
                         (f.id=f2.id) desc, -- prefer original contents record
                         (t.label=?2) desc, -- prefer contents in current drive tape
-                        (t.label in ("#+
-                        &loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+3)).collect::<Vec<String>>().join(",")+
-                        r#") desc, -- prefer contents in loaded tapes
+                        (t.label in ({loaded_tapes}) desc, -- prefer contents in loaded tapes
                         pb2.depth desc -- prefer oldest backup2file record for file contents
                     ) as contents_rank
                 from parent_backup pb
@@ -2478,7 +2474,7 @@ impl Options {
               where metadata_rank=1
                 and contents_rank=1
               order by tape_id, file_id
-            "#;
+            "#, loaded_tapes=&loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+3)).collect::<Vec<String>>().join(","));
             debug!("Running sql query:\n{sql}\n");
             let mut deleted_path = Option::<PathBuf>::None;
             let mut deleted_files = Vec::<FullBackup>::new();

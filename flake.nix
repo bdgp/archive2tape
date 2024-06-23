@@ -14,7 +14,7 @@
         };
 
         rustPkgs = pkgs.rustBuilder.makePackageSet {
-          rustVersion = "1.61.0";
+          rustVersion = "1.75.0";
           packageFun = import ./Cargo.nix;
         };
 
@@ -69,9 +69,9 @@
             export PATH=$RUSTUP_HOME/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH
             '';
           };
+          default = packages.archive2tape-image;
+          devShell = packages.archive2tape-shell;
         };
-        default = packages.archive2tape-image;
-        devShell = packages.archive2tape-shell;
       }
     );
 }
