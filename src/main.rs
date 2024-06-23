@@ -229,6 +229,8 @@ enum Command {
     #[command( about = "List the status of all tapes in the db and loader")]
     ListTapes,
     FormatLTFS(FormatLTFSCmd),
+    #[command( about = "Backfill database name tape tags")]
+    BackfillTapeTags,
     BackfillChecksums(BackfillChecksumsCmd),
     #[command( about = "Validate checksums for all files in the database")]
     ValidateChecksums,
@@ -1199,6 +1201,33 @@ impl Options {
         Ok(())
     }
 
+    
+    fn backfill_tape_tags(&mut self) -> Result<()> {
+        debug!("Called backfill_tape_tags");
+
+        // initialize the backup set's sqlite database
+        self.init_db()?;
+        debug!("Connecting to db {db:?}", db=self.db);
+        let conn = Connection::open(&self.db)?;
+        let db_name = self.db.file_stem().unwrap_or(&OsString::from("backup")).to_string_lossy().into_owned();
+
+        let sql = r#"
+        select distinct t.id as tape_id, t.label as tape_label
+        from file f, tape t
+        where f.tape_id=t.id
+        order by t.id
+        "#;
+        debug!("Running sql query:\n{sql}\n");
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query(params![])?;
+        while let Some(row) = rows.next()? {
+            let _tape_id: i64 = row.get(0)?;
+            let tape_label: String = row.get(1)?;
+            self.add_tape_tag(&db_name, &Some(tape_label))?;
+        }
+        Ok(())
+    }
+
     fn backfill_checksums(&mut self) -> Result<()> {
         debug!("Called backfill_checksums");
         let restore_path = match &self.cmd {
@@ -1447,6 +1476,9 @@ impl Options {
             // even if it's full
             self.loader_status()?.iter().filter(|t| t.storage_type == StorageType::Drive && t.status == StorageStatus::Full).map(|t| t.clone()).next()
         };
+        let db_name = self.db.file_stem().unwrap_or(&OsString::from("backup")).to_string_lossy().into_owned();
+        // add a tape tag for the database name
+        self.add_tape_tag(&db_name, &tape.as_ref().map(|t| t.label.clone()).unwrap_or(None))?;
 
         // get the tape db records
         let mut tapes = LinkedHashMap::<String,Tape>::new();
@@ -1696,6 +1728,8 @@ impl Options {
 
                                             // load the new tape
                                             tape = Some(self.ready_storage(&backup_cmd.tape_tag)?);
+                                            // add a tape tag for the database name
+                                            self.add_tape_tag(&db_name, &tape.as_ref().map(|t| t.label.clone()).unwrap_or(None))?;
 
                                             // update the tape db records
                                             tapes.clear();
@@ -3354,6 +3388,7 @@ fn run(options: &mut Options) -> Result<()> {
         Some(Command::UnmountTape) => info!("{:#?}", options.unmount_tape()?),
         Some(Command::WaitForDrive) => info!("{:#?}", options.wait_for_drive()?),
         Some(Command::WaitForLTFSProcessToTerminate) => info!("{:#?}", options.wait_for_ltfs_process_to_terminate()?),
+        Some(Command::BackfillTapeTags) => info!("{:#?}", options.backfill_tape_tags()?),
         Some(Command::BackfillChecksums(_)) => info!("{:#?}", options.backfill_checksums()?),
         Some(Command::ValidateChecksums) => info!("{:#?}", options.validate_checksums()?),
         _ => {
