@@ -1201,7 +1201,6 @@ impl Options {
         Ok(())
     }
 
-    
     fn backfill_tape_tags(&mut self) -> Result<()> {
         debug!("Called backfill_tape_tags");
 
