@@ -20,7 +20,7 @@ use shell_quote::Sh;
 use walkdir::WalkDir;
 use std::vec::Vec;
 
-use lazy_regex::{regex_captures, regex_is_match, regex_replace};
+use lazy_regex::{regex_captures, regex_is_match, regex_replace, regex_replace_all};
 
 use which::which;
 
@@ -271,9 +271,9 @@ struct Options {
     mt: PathBuf,
     #[arg(long, help = "Path to ltfs command", name="LTFS_PATH", default_value="ltfs")]
     ltfs: PathBuf,
-    #[arg(long, help = "Use a custom shell command to mount the ltfs filesystem", name="MOUNT_COMMAND")]
+    #[arg(long, help = "Use a custom shell command to mount the ltfs filesystem (%l replaced with barcode label)", name="MOUNT_COMMAND")]
     mount_command: Option<String>,
-    #[arg(long, help = "Use a custom shell command to unmount the ltfs filesystem", name="UNMOUNT_COMMAND")]
+    #[arg(long, help = "Use a custom shell command to unmount the ltfs filesystem (%l replaced with barcode label)", name="UNMOUNT_COMMAND")]
     unmount_command: Option<String>,
     #[arg(long, help = "Path to mkltfs command", name="MKLTFS_PATH", default_value="mkltfs")]
     mkltfs: PathBuf,
@@ -287,7 +287,7 @@ struct Options {
     tapes_db: Option<PathBuf>,
     #[arg(long, help = "Create the metadata database if it doesn't exist")]
     create_db: bool,
-    #[arg(long, help = "Mount path for LTFS filesystem (%l replaced with barcode label)", name="LTFS_MOUNT_PATH", default_value="/media/lto8")]
+    #[arg(long, help = "Mount path prefix for LTFS filesystem (mount point will be: ${ltfs_path}/${tape_label}", name="LTFS_MOUNT_PATH", default_value="/media/lto8")]
     ltfs_path: PathBuf,
     #[arg(long, help = "List of tapes to use for backup and restore. If none specified, use any tapes", name="TAPE_LABEL")]
     tapes: Vec<String>,
@@ -629,17 +629,37 @@ impl Options {
 
     fn is_mounted(&self) -> Result<bool> {
         debug!("Running is_mounted");
+        Ok(self.get_mountpoint().is_some())
+    }
+
+    fn fix_mountpoint(&self) -> Result<()> {
+        debug!("Running fix_mountpoint");
         let disks = sysinfo::Disks::new_with_refreshed_list();
         for disk in &disks {
             debug!("Checking disk {disk:?} against {ltfs_path:?}", 
                 disk=disk.mount_point(),
                 ltfs_path=self.ltfs_path);
-            if disk.mount_point() == self.ltfs_path {
+            if disk.mount_point() == &self.ltfs_path {
                 debug!("Found match");
-                return Ok(true);
+                self.unmount_tape()?;
             }
         }
-        Ok(false)
+        Ok(())
+    }
+
+    fn get_mountpoint(&self) -> Option<PathBuf> {
+        debug!("Running get_mountpoint");
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        for disk in &disks {
+            debug!("Checking disk {disk:?} against {ltfs_path:?}", 
+                disk=disk.mount_point(),
+                ltfs_path=self.ltfs_path);
+            if let Some(_) = disk.mount_point().strip_prefix(&self.ltfs_path).ok() {
+                debug!("Found match");
+                return Some(disk.mount_point().to_owned());
+            }
+        }
+        None
     }
 
     fn is_tape_full(&self) -> Result<bool> {
@@ -649,7 +669,7 @@ impl Options {
             debug!("Checking disk {disk:?} against {ltfs_path:?}", 
                 disk=disk.mount_point(),
                 ltfs_path=self.ltfs_path);
-            if disk.mount_point() == self.ltfs_path {
+            if let Some(_) = disk.mount_point().strip_prefix(&self.ltfs_path).ok() {
                 debug!("Found match, available_space = {}", disk.available_space());
                 return Ok(disk.available_space() == 0);
             }
@@ -801,16 +821,29 @@ impl Options {
     }
 
     fn unmount_tape(&self) -> Result<()> {
+        let tape_label = self.loader_status()?.
+            iter().
+            filter(|se| se.storage_type==StorageType::Drive).
+            next().
+            ok_or(eyre!("Could not find drive slot"))?.
+            label.clone().
+            ok_or(eyre!("Could not find tape label"))?;
         info!("Unmounting current tape");
-        if self.is_mounted()? {
+        if let Some(mountpoint) = self.get_mountpoint() {
             if let Some(unmount_command) = &self.unmount_command {
+                let unmount_command = regex_replace_all!(r#"(%[%l])"#, &unmount_command, |_,c| if c=="%l" {&tape_label} else {"%"}).into_owned();
                 cmd!("/bin/sh","-c",unmount_command).run()?;
             }
             else {
                 debug!("Running fusermount command");
-                cmd!(&self.fusermount, "-u", &self.ltfs_path).run()?;
+                cmd!(&self.fusermount, "-u", &mountpoint).run()?;
             }
             self.wait_for_ltfs_process_to_terminate()?;
+            if mountpoint != self.ltfs_path {
+                if let Err(e) = std::fs::remove_dir(&mountpoint) {
+                    warn!("Could not remove old mountpoint {mountpoint:?}: {e}");
+                }
+            }
         }
         Ok(())
     }
@@ -923,17 +956,33 @@ impl Options {
 
     fn mount_tape(&self) -> Result<()> {
         info!("Mounting current tape");
+        let tape_label = self.loader_status()?.
+            iter().
+            filter(|se| se.storage_type==StorageType::Drive).
+            next().
+            ok_or(eyre!("Could not find drive slot"))?.
+            label.clone().
+            ok_or(eyre!("Could not find tape label"))?;
+
+        self.fix_mountpoint()?;
         if ! self.is_mounted()? {
             debug!("Running ltfs commmand");
 
+            std::fs::create_dir_all(&self.ltfs_path.join(&tape_label))?;
+
             if let Some(mount_command) = &self.mount_command {
+                let mount_command = regex_replace_all!(r#"(%[%l])"#, &mount_command, |_,c| if c=="%l" {&tape_label} else {"%"}).into_owned();
                 cmd!("/bin/sh","-c",mount_command).run()?;
+                if ! self.is_mounted()? {
+                    bail!("path {ltfs_path:?} was not mounted", ltfs_path=self.ltfs_path);
+                }
             }
             else {
-                cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.ltfs_drive.display()), &self.ltfs_path).run()?;
-            }
-            if ! self.is_mounted()? {
-                bail!("path {ltfs_path:?} was not mounted", ltfs_path=self.ltfs_path);
+                let ltfs_path = self.ltfs_path.join(&tape_label);
+                cmd!(&self.ltfs, "-o", format!("devname={drive}", drive=self.ltfs_drive.display()), &ltfs_path).run()?;
+                if ! self.is_mounted()? {
+                    bail!("path {ltfs_path:?} was not mounted");
+                }
             }
         }
         else {
@@ -1057,6 +1106,8 @@ impl Options {
                             debug!("insert tape database record");
                             self.insert_tape_record(&label)?;
                         }
+
+                        self.fix_mountpoint()?;
 
                         // if ltfs filesystem is not mounted
                         if !self.is_mounted()? {
@@ -1311,6 +1362,7 @@ impl Options {
                     let timestamp = format!("{newdate}");
                     let source = [
                         &self.ltfs_path, 
+                        &PathBuf::from(current_tape_label.as_ref().unwrap_or(&"unknown".to_string())),
                         &PathBuf::from("backup"),
                         &PathBuf::from(
                             self.db.file_stem().unwrap_or(&OsString::from("backup"))),
@@ -1407,6 +1459,7 @@ impl Options {
                     let timestamp = format!("{newdate}");
                     let source = [
                         &self.ltfs_path, 
+                        &PathBuf::from(current_tape_label.as_ref().unwrap_or(&"unknown".to_string())),
                         &PathBuf::from("backup"),
                         &PathBuf::from(
                             self.db.file_stem().unwrap_or(&OsString::from("backup"))),
@@ -1582,6 +1635,7 @@ impl Options {
         // compute the destination path on the ltfs filesystem
         let dest = [
             &self.ltfs_path, 
+            &PathBuf::from(tape.map(|t| t.label.clone()).unwrap_or(None).unwrap_or("unknown".to_string())), 
             &PathBuf::from("backup"),
             &PathBuf::from(
                 self.db.file_stem().unwrap_or(&OsString::from("backup"))),
@@ -2038,14 +2092,14 @@ impl Options {
                                                             let backup_uuid: String = row.get(4)?;
                                                             let target = [
                                                                 &self.ltfs_path, 
-                                                                &PathBuf::from(tape_label),
+                                                                &PathBuf::from(&tape_label),
                                                                 &PathBuf::from("backup"),
                                                                 &PathBuf::from(
                                                                     self.db.file_stem().unwrap_or(&OsString::from("backup"))),
-                                                                &PathBuf::from(timestamp),
-                                                                &PathBuf::from(backup_uuid),
+                                                                &PathBuf::from(&timestamp),
+                                                                &PathBuf::from(&backup_uuid),
                                                                 &PathBuf::from("rootfs"),
-                                                                &PathBuf::from(source_file_path),
+                                                                &PathBuf::from(&source_file_path),
                                                             ].iter().collect::<PathBuf>();
                                                             let dest_file = PathBuf::from(stfu8::encode_u8_pretty([
                                                                 &dest_path, 
@@ -2527,6 +2581,7 @@ impl Options {
 
                     let source_path = [
                         &self.ltfs_path, 
+                        &PathBuf::from(if let Some(l) = &current_tape_label {l} else {"unknown"}),
                         &PathBuf::from("backup"),
                         &PathBuf::from(
                             self.db.file_stem().unwrap_or(&OsString::from("backup"))),
@@ -2856,6 +2911,7 @@ impl Options {
                                                         else if is_required {
                                                             if se.storage_type == StorageType::Drive {
                                                                 debug!("Tape {label} is already loaded", label=&tape.label);
+                                                                self.fix_mountpoint()?;
                                                                 if ! self.is_mounted()? {
                                                                     self.mount_tape()?;
                                                                 }

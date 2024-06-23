@@ -4,7 +4,7 @@ Description=Start ltfs filesystem
 [Service]
 Type=forking
 User=bbooth
-ExecStart=/usr/local/bin/ltfs -o devname=/dev/sg2 /media/lto8
+ExecStart=/usr/local/bin/archive2tape mount-tape
 Restart=no
 TimeoutSec=7200
 
