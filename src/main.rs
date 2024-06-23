@@ -1465,19 +1465,20 @@ impl Options {
 
         debug!("Connecting to db {db:?}", db=self.db);
         let mut conn = Connection::open(&self.db)?;
+        let db_name = self.db.file_stem().unwrap_or(&OsString::from("backup")).to_string_lossy().into_owned();
 
         let mut tape = if ! backup_cmd.tape_full_test {
             // make sure a non-full tape is loaded, and create any missing tape db records
-            Some(self.ready_storage(&backup_cmd.tape_tag)?)
+            let tape = Some(self.ready_storage(&backup_cmd.tape_tag)?);
+            // add a tape tag for the database name
+            self.add_tape_tag(&db_name, &tape.as_ref().map(|t| t.label.clone()).unwrap_or(None))?;
+            tape
         }
         else {
             // if --tape-full-test was passed, operate on the current tape 
             // even if it's full
             self.loader_status()?.iter().filter(|t| t.storage_type == StorageType::Drive && t.status == StorageStatus::Full).map(|t| t.clone()).next()
         };
-        let db_name = self.db.file_stem().unwrap_or(&OsString::from("backup")).to_string_lossy().into_owned();
-        // add a tape tag for the database name
-        self.add_tape_tag(&db_name, &tape.as_ref().map(|t| t.label.clone()).unwrap_or(None))?;
 
         // get the tape db records
         let mut tapes = LinkedHashMap::<String,Tape>::new();
@@ -1728,7 +1729,9 @@ impl Options {
                                             // load the new tape
                                             tape = Some(self.ready_storage(&backup_cmd.tape_tag)?);
                                             // add a tape tag for the database name
-                                            self.add_tape_tag(&db_name, &tape.as_ref().map(|t| t.label.clone()).unwrap_or(None))?;
+                                            if ! backup_cmd.tape_full_test {
+                                                self.add_tape_tag(&db_name, &tape.as_ref().map(|t| t.label.clone()).unwrap_or(None))?;
+                                            }
 
                                             // update the tape db records
                                             tapes.clear();
