@@ -15,8 +15,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use sha2::Sha256;
 use sha2::Digest;
 use shell_quote::Sh;
-use threadpool::ThreadPool;
-use std::sync::mpsc::channel;
+// use threadpool::ThreadPool;
+// use std::sync::mpsc::channel;
 use walkdir::WalkDir;
 use std::vec::Vec;
 
@@ -1269,48 +1269,47 @@ impl Options {
             }
 
             // change tape
-            if current_tape_label != Some(tape_label) {
+            if current_tape_label != Some(tape_label.clone()) {
                 let tape_slot = ls.iter().filter(|se| se.label.as_deref() == Some(&tape_label)).next();
                 if let Some(tape_slot) = tape_slot {
                     self.unmount_tape()?;
                     self.load_tape(tape_slot.index)?;
                     current_tape_label = Some(tape_label.clone());
+
+                    let datetime = Utc.timestamp_opt(backup_date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
+                    let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
+                    let timestamp = format!("{newdate}");
+                    let source = [
+                        &self.ltfs_path, 
+                        &PathBuf::from("backup"),
+                        &PathBuf::from(
+                            self.db.file_stem().unwrap_or(&OsString::from("backup"))),
+                        &PathBuf::from(&timestamp),
+                        &PathBuf::from(backup_uuid),
+                        &PathBuf::from("rootfs"),
+                        &PathBuf::from(&file_path),
+                    ].iter().collect::<PathBuf>();
+                    if source.exists() {
+                        if source.is_file() {
+                            let mut hasher = Sha256::new();
+                            let mut file = std::fs::File::open(&source)?;
+                            let _ = std::io::copy(&mut file, &mut hasher)?;
+                            let hash_bytes = hasher.finalize();
+                            let checksum = Vec::from(hash_bytes.as_slice());
+
+                            info!("Updating file {file_path:?} with checksum {checksum} from tape {tape_label}", checksum=hex::encode(&checksum));
+                            conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
+                        }
+                        else {
+                            info!("Source file {source:?} is not a file, skipping");
+                        }
+                    }
+                    else {
+                        info!("Source file {source:?} not found, skipping");
+                    }
                 }
                 else {
                     info!("Tape {tape_label} not found in loader, skipping file {file_path:?}");
-                }
-            }
-            if current_tape_label == Some(tape_label) {
-                let datetime = Utc.timestamp_opt(backup_date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
-                let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
-                let timestamp = format!("{newdate}");
-                let source = [
-                    &self.ltfs_path, 
-                    &PathBuf::from("backup"),
-                    &PathBuf::from(
-                        self.db.file_stem().unwrap_or(&OsString::from("backup"))),
-                    &PathBuf::from(&timestamp),
-                    &PathBuf::from(backup_uuid),
-                    &PathBuf::from("rootfs"),
-                    &PathBuf::from(&file_path),
-                ].iter().collect::<PathBuf>();
-                if source.exists() {
-                    if source.is_file() {
-                        let mut hasher = Sha256::new();
-                        let mut file = std::fs::File::open(&source)?;
-                        let _ = std::io::copy(&mut file, &mut hasher)?;
-                        let hash_bytes = hasher.finalize();
-                        let checksum = Vec::from(hash_bytes.as_slice());
-
-                        info!("Updating file {file_path:?} with checksum {checksum} from tape {tape_label}", checksum=hex::encode(&checksum));
-                        conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
-                    }
-                    else {
-                        info!("Source file {source:?} is not a file, skipping");
-                    }
-                }
-                else {
-                    info!("Source file {source:?} not found, skipping");
                 }
             }
         }
@@ -1364,50 +1363,49 @@ impl Options {
             let checksum: Vec<u8> = row.get(5)?;
 
             // change tape
-            if current_tape_label != Some(tape_label) {
+            if current_tape_label != Some(tape_label.clone()) {
                 let tape_slot = ls.iter().filter(|se| se.label.as_deref() == Some(&tape_label)).next();
                 if let Some(tape_slot) = tape_slot {
                     self.unmount_tape()?;
                     self.load_tape(tape_slot.index)?;
                     current_tape_label = Some(tape_label.clone());
-                }
-                else {
-                    info!("Tape {tape_label} not found in loader, skipping file {file_path}");
-                }
-            }
-            if current_tape_label == Some(tape_label) {
-                let datetime = Utc.timestamp_opt(backup_date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
-                let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
-                let timestamp = format!("{newdate}");
-                let source = [
-                    &self.ltfs_path, 
-                    &PathBuf::from("backup"),
-                    &PathBuf::from(
-                        self.db.file_stem().unwrap_or(&OsString::from("backup"))),
-                    &PathBuf::from(&timestamp),
-                    &PathBuf::from(backup_uuid),
-                    &PathBuf::from("rootfs"),
-                    &PathBuf::from(&file_path),
-                ].iter().collect::<PathBuf>();
-                if source.exists() {
-                    if source.is_file() {
-                        let mut hasher = Sha256::new();
-                        let mut file = std::fs::File::open(&source)?;
-                        let _ = std::io::copy(&mut file, &mut hasher)?;
-                        let hash_bytes = hasher.finalize();
-                        let source_checksum = Vec::from(hash_bytes.as_slice());
-                        if source_checksum != checksum {
-                            error!("Checksum mismatch for file {file_path}, expected {checksum}, got {source_checksum}",
-                            checksum=hex::encode(&checksum), 
-                            source_checksum=hex::encode(&source_checksum));
+
+                    let datetime = Utc.timestamp_opt(backup_date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
+                    let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
+                    let timestamp = format!("{newdate}");
+                    let source = [
+                        &self.ltfs_path, 
+                        &PathBuf::from("backup"),
+                        &PathBuf::from(
+                            self.db.file_stem().unwrap_or(&OsString::from("backup"))),
+                        &PathBuf::from(&timestamp),
+                        &PathBuf::from(backup_uuid),
+                        &PathBuf::from("rootfs"),
+                        &PathBuf::from(&file_path),
+                    ].iter().collect::<PathBuf>();
+                    if source.exists() {
+                        if source.is_file() {
+                            let mut hasher = Sha256::new();
+                            let mut file = std::fs::File::open(&source)?;
+                            let _ = std::io::copy(&mut file, &mut hasher)?;
+                            let hash_bytes = hasher.finalize();
+                            let source_checksum = Vec::from(hash_bytes.as_slice());
+                            if source_checksum != checksum {
+                                error!("Checksum mismatch for file {file_path}, expected {checksum}, got {source_checksum}",
+                                checksum=hex::encode(&checksum), 
+                                source_checksum=hex::encode(&source_checksum));
+                            }
+                        }
+                        else {
+                            info!("Source file {source:?} is not a file, skipping");
                         }
                     }
                     else {
-                        info!("Source file {source:?} is not a file, skipping");
+                        info!("Source file {source:?} not found, skipping");
                     }
                 }
                 else {
-                    info!("Source file {source:?} not found, skipping");
+                    info!("Tape {tape_label} not found in loader, skipping file {file_path}");
                 }
             }
         }
@@ -2102,41 +2100,42 @@ impl Options {
                                             trace!("Adding file and backup2file records to database");
                                             if let (Some(backup), Some(tape_record)) = (&backup, &tape_record) {
                                                 let tx = conn.transaction()?;
-
-                                                // insert file record
-                                                let sql = r#"insert into file (tape_id,path,mtime,size,filetype,symlink_target,checksum,is_duplicate) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target,:checksum,:is_duplicate) returning *"#;
-                                                let file = File{
-                                                    id: 0,
-                                                    tape_id: tape_record.id,
-                                                    path: path.clone(),
-                                                    mtime: metadata.mtime(),
-                                                    size: metadata.size(),
-                                                    filetype,
-                                                    symlink_target: target,
-                                                    checksum,
-                                                    is_duplicate,
-                                                };
-                                                trace!("Running sql:\n{sql}\nto insert file {file:?}");
-                                                let mut file_stmt = tx.prepare(sql)?;
-                                                let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(&file, &["tape_id","path","mtime","size","filetype","symlink_target","checksum","is_duplicate"])?.to_slice().as_slice())?;
-
-                                                // insert backup2file record
-                                                let mut rows_iter = serde_rusqlite::from_rows::<File>(rows);
-                                                if let Some(file_record) = rows_iter.next() {
-                                                    let file_record = file_record?;
-                                                    trace!("query returned file record: {file_record:?}");
-                                                    let backup2file = Backup2File {
-                                                        backup_id: backup.id,
-                                                        file_id: file_record.id,
-                                                        uid: metadata.uid(),
-                                                        gid: metadata.gid(),
-                                                        mode: metadata.mode(),
-                                                        is_deleted: false,
+                                                {
+                                                    // insert file record
+                                                    let sql = r#"insert into file (tape_id,path,mtime,size,filetype,symlink_target,checksum,is_duplicate) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target,:checksum,:is_duplicate) returning *"#;
+                                                    let file = File{
+                                                        id: 0,
+                                                        tape_id: tape_record.id,
+                                                        path: path.clone(),
+                                                        mtime: metadata.mtime(),
+                                                        size: metadata.size(),
+                                                        filetype,
+                                                        symlink_target: target,
+                                                        checksum,
+                                                        is_duplicate,
                                                     };
-                                                    let sql = r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#;
-                                                    trace!("Running sql:\n{sql}\nto insert back2file record: {backup2file:?} ");
-                                                    let mut b2f_stmt = tx.prepare(sql)?;
-                                                    b2f_stmt.execute(serde_rusqlite::to_params_named(&backup2file)?.to_slice().as_slice())?;
+                                                    trace!("Running sql:\n{sql}\nto insert file {file:?}");
+                                                    let mut file_stmt = tx.prepare(sql)?;
+                                                    let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(&file, &["tape_id","path","mtime","size","filetype","symlink_target","checksum","is_duplicate"])?.to_slice().as_slice())?;
+
+                                                    // insert backup2file record
+                                                    let mut rows_iter = serde_rusqlite::from_rows::<File>(rows);
+                                                    if let Some(file_record) = rows_iter.next() {
+                                                        let file_record = file_record?;
+                                                        trace!("query returned file record: {file_record:?}");
+                                                        let backup2file = Backup2File {
+                                                            backup_id: backup.id,
+                                                            file_id: file_record.id,
+                                                            uid: metadata.uid(),
+                                                            gid: metadata.gid(),
+                                                            mode: metadata.mode(),
+                                                            is_deleted: false,
+                                                        };
+                                                        let sql = r#"insert into backup2file (backup_id,file_id,uid,gid,mode,is_deleted) values (:backup_id,:file_id,:uid,:gid,:mode,:is_deleted)"#;
+                                                        trace!("Running sql:\n{sql}\nto insert back2file record: {backup2file:?} ");
+                                                        let mut b2f_stmt = tx.prepare(sql)?;
+                                                        b2f_stmt.execute(serde_rusqlite::to_params_named(&backup2file)?.to_slice().as_slice())?;
+                                                    }
                                                 }
                                                 tx.commit()?;
                                                 trace!("Committed");
