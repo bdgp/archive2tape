@@ -37,6 +37,7 @@ hex = "*"
 reflink-copy = "*"
 shell-quote = "*"
 format-bytes = "*"
+threadpool = "*"
 
 [dependencies.clap]
 version = "*"

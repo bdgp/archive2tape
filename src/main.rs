@@ -15,6 +15,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use sha2::Sha256;
 use sha2::Digest;
 use shell_quote::Sh;
+use threadpool::ThreadPool;
+use std::sync::mpsc::channel;
 use walkdir::WalkDir;
 use std::vec::Vec;
 
@@ -80,7 +82,7 @@ struct BackupCmd {
     #[arg(long, help = "Disable using checksums for file deduplication")]
     nochecksums: bool,
     #[arg(long, help = "Number of threads to use when checksumming in parallel (default is all CPU cores)")]
-    threads: Option<u64>,
+    threads: Option<usize>,
     #[arg(long, help = "Tape tag name pattern to match tape tags", name="TAG_NAME_PATTERN")]
     tape_tag: Vec<Pattern>,
     #[arg(help = "Glob patterns to match files in filesystem", name="GLOB_PATTERN")]
@@ -1210,8 +1212,8 @@ impl Options {
         let conn = Connection::open(&self.db)?;
 
         let ls = self.loader_status()?;
-        let orig_tape = self.ready_storage(&vec![])?;
-        let orig_tape_label = orig_tape.label.clone().ok_or(eyre!("Tape label is None!"))?;
+        let orig_tape = ls.iter().filter(|se| se.storage_type==StorageType::Drive).next();
+        let orig_tape_label = orig_tape.map(|se| se.label.clone()).unwrap_or(None);
         let mut current_tape_label = orig_tape_label.clone();
 
         let sql = r#"
@@ -1267,18 +1269,18 @@ impl Options {
             }
 
             // change tape
-            if current_tape_label != tape_label {
+            if current_tape_label != Some(tape_label) {
                 let tape_slot = ls.iter().filter(|se| se.label.as_deref() == Some(&tape_label)).next();
                 if let Some(tape_slot) = tape_slot {
                     self.unmount_tape()?;
                     self.load_tape(tape_slot.index)?;
-                    current_tape_label = tape_label.clone();
+                    current_tape_label = Some(tape_label.clone());
                 }
                 else {
                     info!("Tape {tape_label} not found in loader, skipping file {file_path:?}");
                 }
             }
-            if current_tape_label == tape_label {
+            if current_tape_label == Some(tape_label) {
                 let datetime = Utc.timestamp_opt(backup_date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
                 let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
                 let timestamp = format!("{newdate}");
@@ -1314,8 +1316,10 @@ impl Options {
         }
         // put original tape back
         if current_tape_label != orig_tape_label {
-            self.unmount_tape()?;
-            self.load_tape(orig_tape.index)?;
+            if let Some(orig_tape) = orig_tape {
+                self.unmount_tape()?;
+                self.load_tape(orig_tape.index)?;
+            }
         }
         Ok(())
     }
@@ -1328,8 +1332,8 @@ impl Options {
         let conn = Connection::open(&self.db)?;
 
         let ls = self.loader_status()?;
-        let orig_tape = self.ready_storage(&vec![])?;
-        let orig_tape_label = orig_tape.label.clone().ok_or(eyre!("Tape label is None!"))?;
+        let orig_tape = ls.iter().filter(|se| se.storage_type==StorageType::Drive).next();
+        let orig_tape_label = orig_tape.map(|se| se.label.clone()).unwrap_or(None);
         let mut current_tape_label = orig_tape_label.clone();
 
         let sql = r#"
@@ -1360,18 +1364,18 @@ impl Options {
             let checksum: Vec<u8> = row.get(5)?;
 
             // change tape
-            if current_tape_label != tape_label {
+            if current_tape_label != Some(tape_label) {
                 let tape_slot = ls.iter().filter(|se| se.label.as_deref() == Some(&tape_label)).next();
                 if let Some(tape_slot) = tape_slot {
                     self.unmount_tape()?;
                     self.load_tape(tape_slot.index)?;
-                    current_tape_label = tape_label.clone();
+                    current_tape_label = Some(tape_label.clone());
                 }
                 else {
                     info!("Tape {tape_label} not found in loader, skipping file {file_path}");
                 }
             }
-            if current_tape_label == tape_label {
+            if current_tape_label == Some(tape_label) {
                 let datetime = Utc.timestamp_opt(backup_date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
                 let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
                 let timestamp = format!("{newdate}");
@@ -1409,8 +1413,10 @@ impl Options {
         }
         // put original tape back
         if current_tape_label != orig_tape_label {
-            self.unmount_tape()?;
-            self.load_tape(orig_tape.index)?;
+            if let Some(orig_tape) = orig_tape {
+                self.unmount_tape()?;
+                self.load_tape(orig_tape.index)?;
+            }
         }
         Ok(())
     }
@@ -1548,6 +1554,17 @@ impl Options {
             &PathBuf::from("rootfs"),
         ].iter().collect::<PathBuf>();
         debug!("dest={dest:?}");
+
+        // let (tx, rx) = channel::<File>();
+        // let threads = if let Some(threads) = backup_cmd.threads {
+        //     threads
+        // } else {
+        //     std::thread::available_parallelism()?.get()
+        // };
+        // let pool = ThreadPool::new(threads);
+        // pool.execute(move|| {
+        //     let item = rx.recv().unwrap();
+        // });
 
         let mut count = 0u64;
         let mut tape_full = self.is_tape_full()?;
@@ -1861,11 +1878,21 @@ impl Options {
                                             }
                                         }
 
+                                        // NOTE: parallelize here
+
+                                        // handle file file types
+                                        // compute file checksum, find a candidate contents file, if duplicate, set a placeholder symlink on tape, if tape is full, load new tape
+                                        // if file is not a duplicate, copy it to tape, set mtime, move into place, if tape is full, load new tape
+                                        // add file and backup2file records to the database
+
+                                        // at the end, check if we need to set old_dir's mtime and add records for deleted files
+
                                         let mut checksum = Option::<Vec<u8>>::None;
                                         let mut is_duplicate = false;
 
                                         // handle file types
                                         match filetype {
+                                            // create directory on tape. if tape is full, load new tape
                                             FileType::Directory => {
                                                 trace!("is a directory");
                                                 let destdir = PathBuf::from(stfu8::encode_u8_pretty([
@@ -1893,9 +1920,9 @@ impl Options {
                                                 old_dir.push((destdir.clone(), metadata.mtime()));
                                                 trace!("push old_dir: {old_dir:?}");
                                             },
+                                            // create the symlink on tape, set mtime, if tape is full, load new tape
                                             FileType::Symlink => {
                                                 trace!("is a symlink");
-                                                // create the symlink
                                                 let dest_file = PathBuf::from(stfu8::encode_u8_pretty([
                                                     &dest_path, 
                                                     &PathBuf::from(file_name),
@@ -1933,10 +1960,9 @@ impl Options {
                                                 }
                                             },
                                             FileType::File => {
-                                                // copy file to temp path first
                                                 trace!("is a file");
 
-                                                // compute file checksum, find a candidate contents file, set a placeholder symlink on tape
+                                                // compute file checksum, find a candidate contents file, set a placeholder symlink on tape, if tape is full, load new tape
                                                 if !backup_cmd.nochecksums {
                                                     let mut hasher = Sha256::new();
                                                     let mut file = std::fs::File::open(&path)?;
@@ -1986,6 +2012,7 @@ impl Options {
                                                                 if let Err(e) = std::os::unix::fs::symlink(&target, &dest_file) {
                                                                     if self.is_tape_full()? {
                                                                         tape_full = true;
+                                                                        paths.push(path);
                                                                         continue 'PATHS;
                                                                     }
                                                                     else {
@@ -1999,6 +2026,7 @@ impl Options {
                                                     }
                                                 }
 
+                                                // if file is not a duplicate, copy it to tape, set mtime, move into place, if tape is full, load new tape
                                                 if ! is_duplicate {
                                                     let randext = rand::thread_rng()
                                                         .sample_iter(&Alphanumeric)
@@ -2072,9 +2100,10 @@ impl Options {
                                         // add file and backup2file records to the database
                                         if ! backup_cmd.dry_run {
                                             trace!("Adding file and backup2file records to database");
-                                            let tx = conn.transaction()?;
-
                                             if let (Some(backup), Some(tape_record)) = (&backup, &tape_record) {
+                                                let tx = conn.transaction()?;
+
+                                                // insert file record
                                                 let sql = r#"insert into file (tape_id,path,mtime,size,filetype,symlink_target,checksum,is_duplicate) values (:tape_id,:path,:mtime,:size,:filetype,:symlink_target,:checksum,:is_duplicate) returning *"#;
                                                 let file = File{
                                                     id: 0,
@@ -2089,9 +2118,9 @@ impl Options {
                                                 };
                                                 trace!("Running sql:\n{sql}\nto insert file {file:?}");
                                                 let mut file_stmt = tx.prepare(sql)?;
-                                                // write file and backup2file db records
                                                 let rows = file_stmt.query(serde_rusqlite::to_params_named_with_fields(&file, &["tape_id","path","mtime","size","filetype","symlink_target","checksum","is_duplicate"])?.to_slice().as_slice())?;
 
+                                                // insert backup2file record
                                                 let mut rows_iter = serde_rusqlite::from_rows::<File>(rows);
                                                 if let Some(file_record) = rows_iter.next() {
                                                     let file_record = file_record?;
@@ -2109,13 +2138,13 @@ impl Options {
                                                     let mut b2f_stmt = tx.prepare(sql)?;
                                                     b2f_stmt.execute(serde_rusqlite::to_params_named(&backup2file)?.to_slice().as_slice())?;
                                                 }
+                                                tx.commit()?;
+                                                trace!("Committed");
+                                                count += 1;
                                             }
                                             else {
                                                 bail!("backup record {backup:?} and/or tape record {tape_record:?} empty!");
                                             }
-                                            tx.commit()?;
-                                            trace!("Committed");
-                                            count += 1;
                                         }
                                     }
                                 }
@@ -2215,6 +2244,11 @@ impl Options {
             bail!("Could not find restore path: {restore_path:?}", restore_path=restore_cmd.restore_path);
         }
         debug!("Using restore_path: {:?}", restore_cmd.restore_path);
+
+        let ls = self.loader_status()?;
+        let orig_tape = ls.iter().filter(|se| se.storage_type==StorageType::Drive).next();
+        let orig_tape_label = orig_tape.map(|se| se.label.clone()).unwrap_or(None);
+        let mut current_tape_label = orig_tape_label.clone();
 
         let dedup_script_remap = restore_cmd.dedup_script_remap.iter().
             map(|r| r.split('=')).
@@ -2787,6 +2821,7 @@ impl Options {
                                                                 self.unmount_tape()?;
                                                                 self.load_tape(se.index)?;
                                                                 self.mount_tape()?;
+                                                                current_tape_label = Some(tape.label.clone());
                                                             }
                                                         }
                                                     }
@@ -2913,6 +2948,14 @@ impl Options {
         }
         else {
             bail!("No backup found matching backup_id {backup_id:?}", backup_id=restore_cmd.backup_id);
+        }
+
+        // put original tape back
+        if current_tape_label != orig_tape_label {
+            if let Some(orig_tape) = orig_tape {
+                self.unmount_tape()?;
+                self.load_tape(orig_tape.index)?;
+            }
         }
 
         if restore_cmd.list_tapes {
