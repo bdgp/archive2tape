@@ -61,14 +61,32 @@ use format_bytes::format_bytes;
 // --threads --skip-checksums flag for backup and restore - done
 // tape tags - done
 // parallel checksumming 
+// add extra exclude pattern for @eaDir, .DS_Store, ._*, .AppleDouble, .thumbs_db, etc. - done
+
+static EXTRA_EXCLUDE_PATTERNS: [&str; 12] = [
+    "@eaDir",
+    "#snapshot",
+    ".DS_Store",
+    "._*",
+    ".AppleDouble",
+    ".thumbs_db",
+    ".Trashes",
+    "@synoDir",
+    ".TemporaryItems",
+    ".fseventsd",
+    ".Spotlight-V100",
+    ".DocumentRevisions-V100",
+];
 
 #[derive(Parser, Debug)]
 #[command( about = "Perform a backup to tape")]
 struct BackupCmd {
-    #[arg(long, help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
+    #[arg(long, help = "Glob patterns to include files", name="INCLUDE_PATTERN")]
     include: Vec<Pattern>,
-    #[arg(long, help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
+    #[arg(long, help = "Glob patterns to exclude files", name="EXCLUDE_PATTERN")]
     exclude: Vec<Pattern>,
+    #[arg(long, help = "Extra glob patterns to exclude files", name="EXTRA_EXCLUDE_PATTERN")]
+    extra_exclude: Vec<Pattern>,
     #[arg(long, help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include_regex: Vec<regex::bytes::Regex>,
     #[arg(long, help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
@@ -116,10 +134,12 @@ struct RestoreCmd {
     backup_uuid: Option<String>,
     #[arg(long, help = "Backup date to use for restore (default is latest backup)", name="BACKUP_DATETIME")]
     backup_date: Option<String>,
-    #[arg(long, help = "Regex patterns to include files", name="INCLUDE_PATTERN")]
+    #[arg(long, help = "Glob patterns to include files", name="INCLUDE_PATTERN")]
     include: Vec<Pattern>,
-    #[arg(long, help = "Regex patterns to exclude files", name="EXCLUDE_PATTERN")]
+    #[arg(long, help = "Glob patterns to exclude files", name="EXCLUDE_PATTERN")]
     exclude: Vec<Pattern>,
+    #[arg(long, help = "Extra glob patterns to exclude files", name="EXTRAEXCLUDE_PATTERN")]
+    extra_exclude: Vec<Pattern>,
     #[arg(long, help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include_regex: Vec<regex::bytes::Regex>,
     #[arg(long, help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
@@ -1352,7 +1372,7 @@ impl Options {
           f.mtime as file_mtime
         from file f, backup2file b2f, tape t, backup b
         where b2f.file_id=f.id
-          and b2f.tape_id=t.id
+          and f.tape_id=t.id
           and b2f.backup_id=b.id
           and f.filetype=?1
           and f.checksum is null 
@@ -1380,20 +1400,24 @@ impl Options {
                 &restore_path,
                 file_path_strip_prefix,
             ].iter().collect::<PathBuf>();
-            let metadata = path.metadata()?;
-            if path.exists() && path.is_file() && !path.is_symlink() && metadata.mtime() == file_mtime && metadata.size() == file_size {
-                info!("Computing checksum for {path:?} ... ");
-                let mut hasher = Sha256::new();
-                let mut file = std::fs::File::open(&path)?;
-                let _ = std::io::copy(&mut file, &mut hasher)?;
-                let hash_bytes = hasher.finalize();
-                let checksum = Vec::from(hash_bytes.as_slice());
-                info!("Computed checksum for {path:?} ... {checksum}", checksum=hex::encode(&checksum));
+            debug!("path.exists()={}, path.is_file()={}, path.is_symlink()={}, metadata={:?}", path.exists(), path.is_file(), path.is_symlink(), path.metadata());
+            if path.exists() && path.is_file() && !path.is_symlink() {
+                if let Ok(metadata) = path.metadata() {
+                    debug!("metadata.mtime()={}, file_mtime={}, metadata.size()={}, file_size={}", metadata.mtime(), file_mtime, metadata.size(), file_size);
+                    if metadata.mtime() == file_mtime && metadata.size() == file_size {
+                        info!("Computing checksum for {path:?} ... ");
+                        let mut hasher = Sha256::new();
+                        let mut file = std::fs::File::open(&path)?;
+                        let _ = std::io::copy(&mut file, &mut hasher)?;
+                        let hash_bytes = hasher.finalize();
+                        let checksum = Vec::from(hash_bytes.as_slice());
 
-                info!("Updating file {file_path:?} with checksum {checksum} from storage at {restore_path:?}", checksum=hex::encode(&checksum));
-                conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
-                continue;
-            }
+                        info!("Updating file {file_path:?} with checksum {checksum} from storage at {restore_path:?}", checksum=hex::encode(&checksum));
+                        conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
+                        continue;
+                    }
+                }
+            } 
 
             // change tape
             if current_tape_label != Some(tape_label.clone()) {
@@ -1425,7 +1449,6 @@ impl Options {
                             let _ = std::io::copy(&mut file, &mut hasher)?;
                             let hash_bytes = hasher.finalize();
                             let checksum = Vec::from(hash_bytes.as_slice());
-                            info!("Computed checksum for {source:?} ... {checksum}", checksum=hex::encode(&checksum));
 
                             info!("Updating file {file_path:?} with checksum {checksum} from tape {tape_label}", checksum=hex::encode(&checksum));
                             conn.execute(r#"update file set checksum=?1 where id=?2"#, params![checksum, file_id])?;
@@ -1474,7 +1497,7 @@ impl Options {
           f.checksum
         from file f, backup2file b2f, tape t, backup b
         where b2f.file_id=f.id
-          and b2f.tape_id=t.id
+          and f.tape_id=t.id
           and b2f.backup_id=b.id
           and f.filetype=?1
           and f.checksum is not null
@@ -1516,13 +1539,13 @@ impl Options {
                     ].iter().collect::<PathBuf>();
                     if source.exists() {
                         if source.is_file() {
-                            info!("Computing checksum for {source:?} ... ");
+                            debug!("Computing checksum for {source:?} ... ");
                             let mut hasher = Sha256::new();
                             let mut file = std::fs::File::open(&source)?;
                             let _ = std::io::copy(&mut file, &mut hasher)?;
                             let hash_bytes = hasher.finalize();
                             let source_checksum = Vec::from(hash_bytes.as_slice());
-                            info!("Computed checksum for {source:?} ... {checksum}", checksum=hex::encode(&source_checksum));
+                            debug!("Computed checksum for {source:?} ... {checksum}", checksum=hex::encode(&source_checksum));
                             if source_checksum != checksum {
                                 error!("Checksum mismatch for file {file_path}, expected {checksum}, got {source_checksum}",
                                 checksum=hex::encode(&checksum), 
@@ -1530,15 +1553,15 @@ impl Options {
                             }
                         }
                         else {
-                            info!("Source file {source:?} is not a file, skipping");
+                            debug!("Source file {source:?} is not a file, skipping");
                         }
                     }
                     else {
-                        info!("Source file {source:?} not found, skipping");
+                        debug!("Source file {source:?} not found, skipping");
                     }
                 }
                 else {
-                    info!("Tape {tape_label} not found in loader, skipping file {file_path}");
+                    debug!("Tape {tape_label} not found in loader, skipping file {file_path}");
                 }
             }
         }
@@ -1560,6 +1583,12 @@ impl Options {
         let backup_cmd = match &self.cmd {
             Some(Command::Backup(b)) => b,
             _ => bail!("Couldn't match backup subcommand!")
+        };
+
+        let extra_exclude = if backup_cmd.extra_exclude.is_empty() {
+            &EXTRA_EXCLUDE_PATTERNS.iter().map(|p| Pattern::new(p).map_err(|e| eyre!("{e}"))).collect::<Result<_>>()?
+        } else {
+            &backup_cmd.extra_exclude
         };
 
         debug!("Connecting to db {db:?}", db=self.db);
@@ -1907,6 +1936,13 @@ impl Options {
                                                 }
                                             }
                                         }
+                                        if !extra_exclude.is_empty() {
+                                            for e in extra_exclude {
+                                                if e.matches_path(&path) {
+                                                    continue 'PATHS;
+                                                }
+                                            }
+                                        }
 
                                         // get file metadata
                                         let metadata = match std::fs::symlink_metadata(&path) {
@@ -2118,7 +2154,7 @@ impl Options {
                                                         select distinct f.id, f.path, t.label, b.date_created, b.uuid 
                                                         from file f, backup2file b2f, tape t, backup b 
                                                         where f.id=b2f.file_id 
-                                                          and b2f.tape_id=t.id 
+                                                          and f.tape_id=t.id 
                                                           and b2f.backup_id=b.id 
                                                           and not f.is_duplicate
                                                           and f.checksum=?1 
@@ -2389,6 +2425,12 @@ impl Options {
         }
         debug!("Using restore_path: {:?}", restore_cmd.restore_path);
 
+        let extra_exclude = if restore_cmd.extra_exclude.is_empty() {
+            &EXTRA_EXCLUDE_PATTERNS.iter().map(|p| Pattern::new(p).map_err(|e| eyre!("{e}"))).collect::<Result<_>>()?
+        } else {
+            &restore_cmd.extra_exclude
+        };
+
         let ls = self.loader_status()?;
         let orig_tape = ls.iter().filter(|se| se.storage_type==StorageType::Drive).next();
         let orig_tape_label = orig_tape.map(|se| se.label.clone()).unwrap_or(None);
@@ -2606,6 +2648,13 @@ impl Options {
                     }
                     if !restore_cmd.exclude.is_empty() {
                         for e in &restore_cmd.exclude {
+                            if e.matches_path(&full_backup.dest_path) {
+                                continue;
+                            }
+                        }
+                    }
+                    if !extra_exclude.is_empty() {
+                        for e in extra_exclude {
                             if e.matches_path(&full_backup.dest_path) {
                                 continue;
                             }
