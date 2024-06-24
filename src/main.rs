@@ -1,4 +1,5 @@
 #![cfg_attr(feature = "cargo-clippy", allow(cyclomatic_complexity, trivial_regex))]
+use derive_more::Display;
 use std::os::unix::prelude::MetadataExt;
 use std::path::PathBuf;
 use std::io::{BufRead, BufReader, Write};
@@ -15,6 +16,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use sha2::Sha256;
 use sha2::Digest;
 use shell_quote::Sh;
+use tabled::Tabled;
 // use threadpool::ThreadPool;
 // use std::sync::mpsc::channel;
 use walkdir::WalkDir;
@@ -302,25 +304,34 @@ struct Options {
 }
 
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize, Display)]
 enum StorageType {
     Drive,
     Element,
     ImportExport,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize, Display)]
 enum StorageStatus {
     Empty,
     Full,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+fn display_option<T: std::fmt::Display>(o: &Option<T>) -> String {
+    match o {
+        Some(s) => format!("{s}"),
+        None => "".to_string(),
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize, Tabled)]
 struct StorageElement {
     index: usize,
+    #[tabled(display_with = "display_option")]
     label: Option<String>,
     storage_type: StorageType,
     status: StorageStatus,
+    #[tabled(display_with = "display_option")]
     storage_element_index: Option<usize>,
 }
 
@@ -338,13 +349,18 @@ struct TapeTag {
     tag_name: String,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize, Tabled)]
 struct TapeStatus {
     label: String,
+    #[tabled(display_with = "display_option")]
     is_full: Option<bool>,
+    #[tabled(display_with = "display_option")]
     date_added: Option<String>,
+    #[tabled(display_with = "display_option")]
     storage_type: Option<StorageType>,
+    #[tabled(display_with = "display_option")]
     index: Option<usize>,
+    #[tabled(display_with = "display_option")]
     storage_element_index: Option<usize>,
     tags: String,
 }
@@ -412,11 +428,12 @@ struct File {
     is_duplicate: bool,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize, Tabled)]
 struct Backup {
     id: i64,
     date_created: i64,
     uuid: String,
+    #[tabled(display_with = "display_option")]
     parent_backup_id: Option<i64>,
     is_complete: bool,
 }
@@ -479,12 +496,25 @@ struct NewFile {
     is_duplicate: bool,
 }
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize, Tabled)]
 struct ListTape {
     label: String,
     is_loaded: bool,
     is_required: bool,
 }
+
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Serialize, Deserialize, Tabled)]
+struct ListFile {
+    mode: String,
+    owner: String,
+    group: String,
+    size: String,
+    mtime: String,
+    tape_label: String,
+    path: String,
+    symlink_target: String,
+}
+
 
 macro_rules! cmd {
     ( $program:expr $(, $arg:expr )* $(,)? ) => {
@@ -598,8 +628,8 @@ impl Options {
     }
 
     fn init_pager(&self) -> Result<()> {
-        let pager_cmd = if let Ok(pspg) = which("pspg") {
-            Some(format!("{pspg} --csv --csv-header on", pspg=pspg.display()))
+        let pager_cmd = if let Ok(pager) = std::env::var("PAGER") {
+            Some(pager)
         } 
         else if let Ok(less) = which("less") {
             Some(less.display().to_string())
@@ -619,11 +649,9 @@ impl Options {
     fn loader_status_view(&self) -> Result<()> {
         let ls = self.loader_status()?;
         self.init_pager()?;
-
-        let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
-        for se in &ls {
-            csv_writer.serialize(se)?;
-        }
+        let mut table = tabled::Table::new(&ls);
+        table.with(tabled::settings::Style::psql());
+        println!("{table}");
         Ok(())
     }
 
@@ -3074,10 +3102,9 @@ impl Options {
 
         if restore_cmd.list_tapes {
             self.init_pager()?;
-            let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
-            for (_, lt) in list_tapes {
-                csv_writer.serialize(lt)?;
-            }
+            let mut table = tabled::Table::new(&list_tapes.values().collect::<Vec<&ListTape>>());
+            table.with(tabled::settings::Style::psql());
+            println!("{table}");
         }
         else {
             info!("Restore complete");
@@ -3103,8 +3130,7 @@ impl Options {
         };
 
         self.init_pager()?;
-
-        let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
+        let mut backup_list = Vec::<Backup>::new();
 
         debug!("Connecting to database {db:?}", db=self.db);
         let conn = Connection::open(&self.db)?;
@@ -3139,9 +3165,12 @@ impl Options {
             let mut rows_iter = serde_rusqlite::from_rows::<Backup>(rows);
             while let Some(backup) = rows_iter.next() {
                 let backup = backup?;
-                csv_writer.serialize(backup)?;
+                backup_list.push(backup);
             }
         }
+        let mut table = tabled::Table::new(&backup_list);
+        table.with(tabled::settings::Style::psql());
+        println!("{table}");
         Ok(())
     }
 
@@ -3155,8 +3184,6 @@ impl Options {
         };
 
         self.init_pager()?;
-
-        let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
 
         debug!("Connecting to database {db:?}", db=self.db);
         let conn = Connection::open(&self.db)?;
@@ -3230,8 +3257,8 @@ impl Options {
             let mut stmt = conn.prepare(sql)?;
             let rows = stmt.query([&backup.id])?;
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
-            csv_writer.write_record(&["mode","owner","group","size","mtime","tape_label","path","symlink_target"])?;
             let mut deleted_path = Option::<PathBuf>::None;
+            let mut list_files = Vec::<ListFile>::new();
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
 
@@ -3324,21 +3351,25 @@ impl Options {
                     });
                 let symlink_target = full_backup.symlink_target.map(|p| stfu8::encode_u8_pretty(p.as_os_str().as_bytes()));
 
-                csv_writer.write_record([
-                    &file_mode::Mode::from(full_backup.mode).to_string(),
-                    &cache.get_user_by_uid(full_backup.uid).
+                let list_file = ListFile {
+                    mode: file_mode::Mode::from(full_backup.mode).to_string(),
+                    owner: cache.get_user_by_uid(full_backup.uid).
                         map(|u| u.name().to_string_lossy().into_owned()).
                         unwrap_or_else(|| full_backup.uid.to_string()),
-                    &cache.get_group_by_gid(full_backup.gid).
+                    group: cache.get_group_by_gid(full_backup.gid).
                         map(|u| u.name().to_string_lossy().into_owned()).
                         unwrap_or_else(|| full_backup.gid.to_string()),
-                    &full_backup.size.to_string(),
-                    &timestamp,
-                    &tape.label,
-                    &path,
-                    &symlink_target.unwrap_or_else(|| "".to_string()),
-                ])?;
+                    size: full_backup.size.to_string(),
+                    mtime: timestamp,
+                    tape_label: tape.label.clone(),
+                    path: path,
+                    symlink_target: symlink_target.unwrap_or_else(|| "".to_string()),
+                };
+                list_files.push(list_file);
             }
+            let mut table = tabled::Table::new(&list_files);
+            table.with(tabled::settings::Style::psql());
+            println!("{table}");
         }
         Ok(())
     }
@@ -3382,7 +3413,7 @@ impl Options {
 
         self.init_pager()?;
 
-        let mut csv_writer = csv::Writer::from_writer(std::io::stdout());
+        let mut tape_statuses = Vec::<TapeStatus>::new();
         for label in &tape_labels {
             debug!("label={label:?}");
             let tape = tapes.get(label);
@@ -3407,8 +3438,11 @@ impl Options {
                 tags: if tags.is_empty() {"".to_string()} else {String::from_utf8(wtr.into_inner()?)?.trim_end_matches('\n').to_string()},
             };
             debug!("ts={ts:?}");
-            csv_writer.serialize(ts)?;
+            tape_statuses.push(ts);
         }
+        let mut table = tabled::Table::new(&tape_statuses);
+        table.with(tabled::settings::Style::psql());
+        println!("{table}");
         Ok(())
     }
 }

@@ -38,6 +38,8 @@ reflink-copy = "*"
 shell-quote = "*"
 format-bytes = "*"
 threadpool = "*"
+tabled = "*"
+derive_more = "*"
 
 [dependencies.clap]
 version = "*"
