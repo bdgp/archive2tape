@@ -118,6 +118,7 @@ enum DedupMethod {
     Hardlink,
     Symlink,
     Reflink,
+    CopyScript,
     HardlinkScript,
     SymlinkScript,
     ReflinkScript,
@@ -148,6 +149,8 @@ struct RestoreCmd {
     include_regex: Vec<regex::bytes::Regex>,
     #[arg(long, help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
     exclude_regex: Vec<regex::bytes::Regex>,
+    #[arg(long, help = "Minimum file size in bytes before file-level deduplication is attempted.", default_value="1024768")]
+    min_dedup_size: u64,
     #[arg(long, help = "Do not actually restore any files, just show what files would be restored")]
     dry_run: bool,
     #[arg(long, help = "Remove database records if the file does not exist on tape")]
@@ -1424,7 +1427,7 @@ impl Options {
             } 
 
             // change tape
-            if current_tape_label != Some(tape_label.clone()) {
+            if current_tape_label.as_ref() != Some(&tape_label) {
                 let tape_slot = ls.iter().filter(|se| se.label.as_deref() == Some(&tape_label)).next();
                 if let Some(tape_slot) = tape_slot {
                     self.unmount_tape()?;
@@ -1520,7 +1523,7 @@ impl Options {
             let checksum: Vec<u8> = row.get(5)?;
 
             // change tape
-            if current_tape_label != Some(tape_label.clone()) {
+            if current_tape_label.as_ref() != Some(&tape_label) {
                 let tape_slot = ls.iter().filter(|se| se.label.as_deref() == Some(&tape_label)).next();
                 if let Some(tape_slot) = tape_slot {
                     self.unmount_tape()?;
@@ -1800,7 +1803,7 @@ impl Options {
                                                                 trace!("is a file");
                                                                 if !path.is_symlink() && path.is_file() {
                                                                     trace!("found file {path:?}");
-                                                                    if let Ok(md) = std::fs::metadata(&path) {
+                                                                    if let Ok(md) = std::fs::symlink_metadata(&path) {
                                                                         if md.size() == new_file.size && md.mtime() == new_file.mtime {
                                                                             trace!("sizes and mtimes match, files are the same");
                                                                             file_exists = true;
@@ -2440,6 +2443,7 @@ impl Options {
         let orig_tape_label = orig_tape.map(|se| se.label.clone()).unwrap_or(None);
         let mut current_tape_label = orig_tape_label.clone();
 
+        let mut dedup_script = Option::<std::io::BufWriter<std::fs::File>>::None;
         let dedup_script_remap = restore_cmd.dedup_script_remap.iter().
             map(|r| r.split('=')).
             map(|mut r| 
@@ -2535,7 +2539,7 @@ impl Options {
                 (not f2.is_duplicate) as non_duplicate, 
                 (f.id=f2.id) as original_file,
                 (t.label=?2) as drive_tape,
-                (t.label in ({loaded_tapes}) as loaded_tape,
+                (t.label in ({loaded_tapes})) as loaded_tape,
                 pb2.depth as depth2, 
                 row_number() over (
                     partition by f.path 
@@ -2546,8 +2550,9 @@ impl Options {
                     order by (not f2.is_duplicate) desc, -- prefer non-duplicate contents records
                         (f.id=f2.id) desc, -- prefer original contents record
                         (t.label=?2) desc, -- prefer contents in current drive tape
-                        (t.label in ({loaded_tapes}) desc, -- prefer contents in loaded tapes
-                        pb2.depth desc -- prefer oldest backup2file record for file contents
+                        (t.label in ({loaded_tapes})) desc, -- prefer contents in loaded tapes
+                        pb2.depth desc, -- prefer oldest backup2file record for file contents
+                        f2.id -- use file_id as tiebreaker
                     ) as contents_rank
                 from parent_backup pb
                 join backup2file b2f
@@ -2695,11 +2700,16 @@ impl Options {
                     trace!("source={source:?}");
 
                     // potential source contents path on destination storage for deduplication
-                    let contents = [
-                        &restore_cmd.restore_path.as_path(),
-                        &full_backup_source_path,
-                    ].iter().collect::<PathBuf>();
-                    trace!("contents={contents:?}");
+                    let mut contents_list = Vec::<File>::new();
+                    let sql = r#"select * from file f where checksum=?1 and path != ?2 order by id desc"#;
+                    let mut stmt = conn.prepare(sql)?;
+                    let rows = stmt.query(params![full_backup.checksum, stfu8::encode_u8_pretty(full_backup.dest_path.as_os_str().as_bytes())])?;
+                    let rows_iter = serde_rusqlite::from_rows::<File>(rows);
+                    for file in rows_iter {
+                        let file = file?;
+                        contents_list.push(file);
+                    }
+                    trace!("contents_list={contents_list:?}");
 
                     // destination path on storage
                     let full_backup_dest_path = full_backup.dest_path.strip_prefix("/").unwrap_or_else(|_| full_backup.dest_path.as_path());
@@ -2743,7 +2753,7 @@ impl Options {
                                 info!("{source:?}/ -> {dest:?}/");
                             }
                             let mut mtime = full_backup.mtime;
-                            let md = std::fs::metadata(&dest).ok(); 
+                            let md = std::fs::symlink_metadata(&dest).ok(); 
                             if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                 trace!("mkdir {dest:?} with mode {mode}", mode=full_backup.mode);
                                 match nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode)) {
@@ -2807,7 +2817,7 @@ impl Options {
 
                                 // if mtime and size is the same, skip copying the file
                                 trace!("check if file {dest:?} is already up to date");
-                                let attr = std::fs::metadata(&dest)?;
+                                let attr = std::fs::symlink_metadata(&dest)?;
                                 if dest.is_file() && attr.mtime() == full_backup.mtime && attr.size() == full_backup.size {
                                     trace!("file {dest:?} is already up to date");
                                     if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
@@ -2836,18 +2846,30 @@ impl Options {
                             }
                             if let Some(dest_path) = dest.parent() {
                                 if let Some(file_name) = dest.file_name() {
+                                    let mut contents = Option::<PathBuf>::None;
                                     let mut dedup_method = restore_cmd.dedup_method.clone();
                                     match dedup_method {
                                         DedupMethod::Hardlink | DedupMethod::Symlink | DedupMethod::Reflink | 
                                         DedupMethod::HardlinkScript | DedupMethod::SymlinkScript | DedupMethod::ReflinkScript => {
-                                            if let Some(metadata) = contents.metadata().ok() {
-                                                if !(contents.exists() && 
-                                                    contents.is_file() && 
-                                                    !contents.is_symlink() && 
-                                                    metadata.size() == full_backup.size && 
-                                                    metadata.mtime() == full_backup.source_mtime)
-                                                {
-                                                    // fall back to copying if the contents file is not in the correct state
+                                            if full_backup.size <= restore_cmd.min_dedup_size {
+                                                dedup_method = DedupMethod::Copy;
+                                            }
+                                            else {
+                                                for contents_file in &contents_list {
+                                                    if let Some(metadata) = contents_file.path.symlink_metadata().ok() {
+                                                        if contents_file.path.exists() && 
+                                                            contents_file.path.is_file() && 
+                                                            !contents_file.path.is_symlink() && 
+                                                            metadata.size() == full_backup.size && 
+                                                            metadata.mtime() == full_backup.source_mtime
+                                                        {
+                                                            contents = Some(contents_file.path.clone());
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                // fall back to copying if the contents file is not in the correct state
+                                                if contents.is_none() {
                                                     dedup_method = DedupMethod::Copy;
                                                 }
                                             }
@@ -2855,114 +2877,126 @@ impl Options {
                                         _ => {}
                                     }
 
-                                    let mut dedup_script = Option::<std::fs::File>::None;
                                     match dedup_method {
                                         DedupMethod::Hardlink => { 
-                                            trace!("create hardlink {dest:?} -> {contents:?}");
-                                            if let Err(e) = std::fs::hard_link(&contents, &dest) {
-                                                if !dest.exists() {
-                                                    Err(e)?
+                                            if let Some(contents) = &contents {
+                                                trace!("create hardlink {dest:?} -> {contents:?}");
+                                                if let Err(e) = std::fs::hard_link(&contents, &dest) {
+                                                    if !dest.exists() {
+                                                        Err(e)?
+                                                    }
                                                 }
+                                                trace!("chown {dest:?}");
+                                                nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                                // set mode
+                                                trace!("chmod {dest:?}");
+                                                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                                trace!("set mtime for {dest:?}");
+                                                // set the file's mtime
+                                                let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                                filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
                                             }
-                                            trace!("chown {dest:?}");
-                                            nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
-                                            // set mode
-                                            trace!("chmod {dest:?}");
-                                            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
-                                            trace!("set mtime for {dest:?}");
-                                            // set the file's mtime
-                                            let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
-                                            filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
                                         },
                                         DedupMethod::Symlink => { 
-                                            trace!("create symlink {dest:?} -> {contents:?}");
-                                            if let Err(e) = std::os::unix::fs::symlink(&contents, &dest) {
-                                                if !dest.exists() || std::fs::read_link(&dest)? != dest {
-                                                    Err(e)?
+                                            if let Some(contents) = &contents {
+                                                trace!("create symlink {dest:?} -> {contents:?}");
+                                                if let Err(e) = std::os::unix::fs::symlink(&contents, &dest) {
+                                                    if !dest.exists() || std::fs::read_link(&dest)? != dest {
+                                                        Err(e)?
+                                                    }
                                                 }
+                                                trace!("chown {dest:?}");
+                                                nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                                // set mode
+                                                trace!("chmod {dest:?}");
+                                                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                                trace!("set mtime for {dest:?}");
+                                                // set the file's mtime
+                                                let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                                filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
                                             }
-                                            trace!("chown {dest:?}");
-                                            nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
-                                            // set mode
-                                            trace!("chmod {dest:?}");
-                                            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
-                                            trace!("set mtime for {dest:?}");
-                                            // set the file's mtime
-                                            let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
-                                            filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
                                         },
                                         DedupMethod::Reflink => { 
-                                            trace!("create reflink {dest:?} -> {contents:?}");
-                                            if let Err(e) = reflink_copy::reflink(&contents, &dest) {
-                                                if !dest.exists() {
-                                                    Err(e)?
+                                            if let Some(contents) = &contents {
+                                                trace!("create reflink {dest:?} -> {contents:?}");
+                                                if let Err(e) = reflink_copy::reflink(&contents, &dest) {
+                                                    if !dest.exists() {
+                                                        Err(e)?
+                                                    }
                                                 }
+                                                trace!("chown {dest:?}");
+                                                nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                                // set mode
+                                                trace!("chmod {dest:?}");
+                                                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                                trace!("set mtime for {dest:?}");
+                                                // set the file's mtime
+                                                let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                                filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
                                             }
-                                            trace!("chown {dest:?}");
-                                            nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
-                                            // set mode
-                                            trace!("chmod {dest:?}");
-                                            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
-                                            trace!("set mtime for {dest:?}");
-                                            // set the file's mtime
-                                            let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
-                                            filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
                                         },
-                                        DedupMethod::HardlinkScript | DedupMethod::SymlinkScript | DedupMethod::ReflinkScript => { 
-                                            if dedup_script.is_none() {
-                                                dedup_script = Some(std::fs::File::create(&restore_cmd.dedup_script_path)?);
-                                            }
-                                            if let Some(dedup_script) = dedup_script {
-                                                let mut dedup_script = std::io::BufWriter::new(dedup_script);
-                                                let mut contents = contents;
-                                                let mut dest = dest;
-                                                let mut remapped_contents = false;
-                                                let mut remapped_dest = false;
-                                                for (k, v) in &dedup_script_remap {
-                                                    let k = PathBuf::from(k);
-                                                    let v = PathBuf::from(v);
-                                                    if !remapped_contents {
-                                                        if let Ok(removed) = contents.strip_prefix(&k) {
-                                                            contents = v.join(removed);
-                                                            remapped_contents = true;
-                                                        }
-                                                    }
-                                                    if !remapped_dest  {
-                                                        if let Ok(removed) = dest.strip_prefix(&k) {
-                                                            dest = v.join(removed);
-                                                            remapped_dest = true;
-                                                        }
-                                                    }
-                                                    if remapped_contents && remapped_dest {
-                                                        break;
-                                                    }
+                                        DedupMethod::HardlinkScript | DedupMethod::SymlinkScript | DedupMethod::ReflinkScript | DedupMethod::CopyScript => { 
+                                            if let Some(contents) = &contents {
+                                                if dedup_script.is_none() {
+                                                    dedup_script = Some(std::io::BufWriter::new(std::fs::File::create(&restore_cmd.dedup_script_path)?));
                                                 }
-                                                if dedup_method == DedupMethod::ReflinkScript {
-                                                    dedup_script.write(&format_bytes!(b"cp -vf --reflink {} {}",
-                                                        Sh::quote(&contents),
+                                                if let Some(dedup_script) = &mut dedup_script {
+                                                    let mut contents = contents.clone();
+                                                    let mut dest = dest;
+                                                    let mut remapped_contents = false;
+                                                    let mut remapped_dest = false;
+                                                    for (k, v) in &dedup_script_remap {
+                                                        let k = PathBuf::from(k);
+                                                        let v = PathBuf::from(v);
+                                                        if !remapped_contents {
+                                                            if let Ok(removed) = contents.strip_prefix(&k) {
+                                                                contents = v.join(removed);
+                                                                remapped_contents = true;
+                                                            }
+                                                        }
+                                                        if !remapped_dest  {
+                                                            if let Ok(removed) = dest.strip_prefix(&k) {
+                                                                dest = v.join(removed);
+                                                                remapped_dest = true;
+                                                            }
+                                                        }
+                                                        if remapped_contents && remapped_dest {
+                                                            break;
+                                                        }
+                                                    }
+                                                    if dedup_method == DedupMethod::ReflinkScript {
+                                                        dedup_script.write(&format_bytes!(b"cp -vf --reflink {} {}",
+                                                            Sh::quote(&contents),
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                    }
+                                                    else if dedup_method == DedupMethod::CopyScript {
+                                                        dedup_script.write(&format_bytes!(b"cp -vf {} {}",
+                                                            Sh::quote(&contents),
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                    }
+                                                    else {
+                                                        dedup_script.write(&format_bytes!(b"ln -{}vf {} {}", 
+                                                            if dedup_method == DedupMethod::SymlinkScript {"s".as_bytes()} else {"".as_bytes()},
+                                                            Sh::quote(&contents),
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                    }
+                                                    dedup_script.write(&format_bytes!(b"chown {}:{} {}", 
+                                                        full_backup.uid,
+                                                        full_backup.gid,
+                                                        Sh::quote(&dest),
+                                                    ))?;
+                                                    dedup_script.write(&format_bytes!(b"chmod {} {}", 
+                                                        format!("{:o}", full_backup.mode).as_bytes(),
+                                                        Sh::quote(&dest),
+                                                    ))?;
+                                                    dedup_script.write(&format_bytes!(b"touch -d @{} {}", 
+                                                        full_backup.mtime,
                                                         Sh::quote(&dest),
                                                     ))?;
                                                 }
-                                                else {
-                                                    dedup_script.write(&format_bytes!(b"ln -{}vf {} {}", 
-                                                        if dedup_method == DedupMethod::SymlinkScript {"s".as_bytes()} else {"".as_bytes()},
-                                                        Sh::quote(&contents),
-                                                        Sh::quote(&dest),
-                                                    ))?;
-                                                }
-                                                dedup_script.write(&format_bytes!(b"chown {}:{} {}", 
-                                                    full_backup.uid,
-                                                    full_backup.gid,
-                                                    Sh::quote(&dest),
-                                                ))?;
-                                                dedup_script.write(&format_bytes!(b"chmod {} {}", 
-                                                    format!("{:o}", full_backup.mode).as_bytes(),
-                                                    Sh::quote(&dest),
-                                                ))?;
-                                                dedup_script.write(&format_bytes!(b"touch -d @{} {}", 
-                                                    full_backup.mtime,
-                                                    Sh::quote(&dest),
-                                                ))?;
                                             }
                                         },
                                         DedupMethod::Copy => {
@@ -2979,8 +3013,32 @@ impl Options {
                                             ].iter().collect::<PathBuf>();
                                             trace!("tmp_file = {tmp_file:?}");
 
+                                            // perform a deduplicated copy from destination to destination
+                                            if let Some(contents) = &contents {
+                                                info!("[DEDUP] {contents:?} -> {dest:?}");
+                                                trace!("contents={contents:?}");
+                                                trace!("tmp_file={tmp_file:?}");
+                                                trace!("dest={dest:?}");
+                                                trace!("copying {contents:?} to {tmp_file:?}");
+                                                std::fs::copy(&contents, &tmp_file)?;
+                                                trace!("chown {tmp_file:?}");
+                                                nix::unistd::chown(&tmp_file, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                                // set mode
+                                                trace!("chmod {tmp_file:?}");
+                                                std::fs::set_permissions(&tmp_file, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                                trace!("set mtime for {tmp_file:?}");
+                                                // set the file's mtime
+                                                let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                                filetime::set_file_times(&tmp_file, mtime.clone(), mtime.clone())?;
+                                                // then move file into place
+                                                trace!("move {tmp_file:?} to {dest:?}");
+                                                std::fs::rename(&tmp_file, &dest)?;
+                                                continue;
+                                            }
+                                            
+
                                             if ! restore_cmd.list_tapes {
-                                                info!("{source:?} -> {dest:?}");
+                                                info!("[TAPE] {source:?} -> {dest:?}");
                                             }
 
                                             // make sure correct tape is loaded and mounted
