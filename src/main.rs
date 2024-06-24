@@ -2699,18 +2699,6 @@ impl Options {
                     ].iter().collect::<PathBuf>().display().to_string())?));
                     trace!("source={source:?}");
 
-                    // potential source contents path on destination storage for deduplication
-                    let mut contents_list = Vec::<File>::new();
-                    let sql = r#"select * from file f where checksum=?1 and path != ?2 order by id desc"#;
-                    let mut stmt = conn.prepare(sql)?;
-                    let rows = stmt.query(params![full_backup.checksum, stfu8::encode_u8_pretty(full_backup.dest_path.as_os_str().as_bytes())])?;
-                    let rows_iter = serde_rusqlite::from_rows::<File>(rows);
-                    for file in rows_iter {
-                        let file = file?;
-                        contents_list.push(file);
-                    }
-                    trace!("contents_list={contents_list:?}");
-
                     // destination path on storage
                     let full_backup_dest_path = full_backup.dest_path.strip_prefix("/").unwrap_or_else(|_| full_backup.dest_path.as_path());
                     let dest = [
@@ -2846,6 +2834,18 @@ impl Options {
                             }
                             if let Some(dest_path) = dest.parent() {
                                 if let Some(file_name) = dest.file_name() {
+                                    // potential source contents path on destination storage for deduplication
+                                    let mut contents_list = Vec::<File>::new();
+                                    let sql = r#"select * from file f where checksum=?1 and path != ?2 order by id desc"#;
+                                    let mut stmt = conn.prepare(sql)?;
+                                    let rows = stmt.query(params![full_backup.checksum, stfu8::encode_u8_pretty(full_backup.dest_path.as_os_str().as_bytes())])?;
+                                    let rows_iter = serde_rusqlite::from_rows::<File>(rows);
+                                    for file in rows_iter {
+                                        let file = file?;
+                                        contents_list.push(file);
+                                    }
+                                    trace!("contents_list={contents_list:?}");
+
                                     let mut contents = Option::<PathBuf>::None;
                                     let mut dedup_method = restore_cmd.dedup_method.clone();
                                     match dedup_method {
