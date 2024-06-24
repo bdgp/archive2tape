@@ -2587,6 +2587,9 @@ impl Options {
                 }
                 let rows = stmt.query(rusqlite::params_from_iter(param_values))?;
                 let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
+
+                let sql = r#"select * from file f where checksum=?1 and path != ?2 order by id desc"#;
+                let mut stmt = conn.prepare(sql)?;
                 while let Some(full_backup) = rows_iter.next() {
                     let full_backup = full_backup?;
                     trace!("Handling full_backup record: {full_backup:?}");
@@ -2835,17 +2838,6 @@ impl Options {
                             if let Some(dest_path) = dest.parent() {
                                 if let Some(file_name) = dest.file_name() {
                                     // potential source contents path on destination storage for deduplication
-                                    let mut contents_list = Vec::<File>::new();
-                                    let sql = r#"select * from file f where checksum=?1 and path != ?2 order by id desc"#;
-                                    let mut stmt = conn.prepare(sql)?;
-                                    let rows = stmt.query(params![full_backup.checksum, stfu8::encode_u8_pretty(full_backup.dest_path.as_os_str().as_bytes())])?;
-                                    let rows_iter = serde_rusqlite::from_rows::<File>(rows);
-                                    for file in rows_iter {
-                                        let file = file?;
-                                        contents_list.push(file);
-                                    }
-                                    trace!("contents_list={contents_list:?}");
-
                                     let mut contents = Option::<PathBuf>::None;
                                     let mut dedup_method = restore_cmd.dedup_method.clone();
                                     match dedup_method {
@@ -2855,7 +2847,10 @@ impl Options {
                                                 dedup_method = DedupMethod::Copy;
                                             }
                                             else {
-                                                for contents_file in &contents_list {
+                                                let rows = stmt.query(params![full_backup.checksum, stfu8::encode_u8_pretty(full_backup.dest_path.as_os_str().as_bytes())])?;
+                                                let rows_iter = serde_rusqlite::from_rows::<File>(rows);
+                                                for contents_file in rows_iter {
+                                                    let contents_file = contents_file?;
                                                     if let Some(metadata) = contents_file.path.symlink_metadata().ok() {
                                                         if contents_file.path.exists() && 
                                                             contents_file.path.is_file() && 
