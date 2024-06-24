@@ -87,6 +87,8 @@ struct BackupCmd {
     exclude: Vec<Pattern>,
     #[arg(long, help = "Extra glob patterns to exclude files", name="EXTRA_EXCLUDE_PATTERN")]
     extra_exclude: Vec<Pattern>,
+    #[arg(long, help = "Ignore extra exclude glob patterns")]
+    ignore_extra_exclude: bool,
     #[arg(long, help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include_regex: Vec<regex::bytes::Regex>,
     #[arg(long, help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
@@ -140,6 +142,8 @@ struct RestoreCmd {
     exclude: Vec<Pattern>,
     #[arg(long, help = "Extra glob patterns to exclude files", name="EXTRAEXCLUDE_PATTERN")]
     extra_exclude: Vec<Pattern>,
+    #[arg(long, help = "Ignore extra exclude glob patterns")]
+    ignore_extra_exclude: bool,
     #[arg(long, help = "Regex patterns to include files", name="INCLUDE_REGEX")]
     include_regex: Vec<regex::bytes::Regex>,
     #[arg(long, help = "Regex patterns to exclude files", name="EXCLUDE_REGEX")]
@@ -1936,7 +1940,7 @@ impl Options {
                                                 }
                                             }
                                         }
-                                        if !extra_exclude.is_empty() {
+                                        if !backup_cmd.ignore_extra_exclude && !extra_exclude.is_empty() {
                                             for e in extra_exclude {
                                                 if e.matches_path(&path) {
                                                     continue 'PATHS;
@@ -2653,7 +2657,7 @@ impl Options {
                             }
                         }
                     }
-                    if !extra_exclude.is_empty() {
+                    if !restore_cmd.ignore_extra_exclude && !extra_exclude.is_empty() {
                         for e in extra_exclude {
                             if e.matches_path(&full_backup.dest_path) {
                                 continue;
