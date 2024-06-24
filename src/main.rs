@@ -650,7 +650,7 @@ impl Options {
         let ls = self.loader_status()?;
         self.init_pager()?;
         let mut table = tabled::Table::new(&ls);
-        table.with(tabled::settings::Style::psql());
+        table.with(tabled::settings::Style::sharp());
         println!("{table}");
         Ok(())
     }
@@ -3103,7 +3103,7 @@ impl Options {
         if restore_cmd.list_tapes {
             self.init_pager()?;
             let mut table = tabled::Table::new(&list_tapes.values().collect::<Vec<&ListTape>>());
-            table.with(tabled::settings::Style::psql());
+            table.with(tabled::settings::Style::sharp());
             println!("{table}");
         }
         else {
@@ -3169,7 +3169,7 @@ impl Options {
             }
         }
         let mut table = tabled::Table::new(&backup_list);
-        table.with(tabled::settings::Style::psql());
+        table.with(tabled::settings::Style::sharp());
         println!("{table}");
         Ok(())
     }
@@ -3368,7 +3368,7 @@ impl Options {
                 list_files.push(list_file);
             }
             let mut table = tabled::Table::new(&list_files);
-            table.with(tabled::settings::Style::psql());
+            table.with(tabled::settings::Style::sharp());
             println!("{table}");
         }
         Ok(())
@@ -3441,7 +3441,7 @@ impl Options {
             tape_statuses.push(ts);
         }
         let mut table = tabled::Table::new(&tape_statuses);
-        table.with(tabled::settings::Style::psql());
+        table.with(tabled::settings::Style::sharp());
         println!("{table}");
         Ok(())
     }
