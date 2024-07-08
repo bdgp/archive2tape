@@ -265,6 +265,8 @@ enum Command {
     ValidateChecksums,
     #[command( about = "Test if the LTFS filesystem is mounted")]
     IsMounted,
+    #[command( about = "Get the current mount point")]
+    GetMountPoint,
     #[command( about = "Test if the current tape is full")]
     IsTapeFull,
     #[command( about = "List all the tapes in the loader")]
@@ -876,17 +878,9 @@ impl Options {
     }
 
     fn unmount_tape(&self) -> Result<()> {
-        let tape_label = self.loader_status()?.
-            iter().
-            filter(|se| se.storage_type==StorageType::Drive).
-            next().
-            ok_or(eyre!("Could not find drive slot"))?.
-            label.clone().
-            ok_or(eyre!("Could not find tape label"))?;
         info!("Unmounting current tape");
         if let Some(mountpoint) = self.get_mountpoint() {
             if let Some(unmount_command) = &self.unmount_command {
-                let unmount_command = regex_replace_all!(r#"(%[%l])"#, &unmount_command, |_,c| if c=="%l" {&tape_label} else {"%"}).into_owned();
                 cmd!("/bin/sh","-c",unmount_command).run()?;
             }
             else {
@@ -3594,6 +3588,7 @@ fn run(options: &mut Options) -> Result<()> {
         Some(Command::ListTapes) => options.list_tapes()?,
         Some(Command::FormatLTFS(_)) => info!("{:#?}", options.format_ltfs()?),
         Some(Command::IsMounted) => info!("{:#?}", options.is_mounted()?),
+        Some(Command::GetMountPoint) => info!("{:#?}", options.get_mountpoint()),
         Some(Command::IsTapeFull) => info!("{:#?}", options.is_tape_full()?),
         Some(Command::LoaderStatus) => options.loader_status_view()?,
         Some(Command::LoadTape(load_tape_cmd)) => info!("{:#?}", options.load_tape(load_tape_cmd.slot)?),
