@@ -3523,7 +3523,7 @@ impl Options {
             let mut table = tabled::Table::new(&list_files);
             table.with(tabled::settings::Style::sharp());
             println!("{table}");
-            println!("Total size: {total_size} ({total_bytes} bytes); deduplicated: {dedup_size} ({dedup_bytes} bytes)", total_size=Size::from_bytes(total_bytes), dedup_size=Size::from_bytes(dedup_bytes));
+            println!("Total size: {total_size} ({total_bytes} bytes); deduplicated size: {dedup_size} ({dedup_bytes} bytes)", total_size=Size::from_bytes(total_bytes), dedup_size=Size::from_bytes(dedup_bytes));
         }
         Ok(())
     }
