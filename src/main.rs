@@ -159,7 +159,7 @@ struct RestoreCmd {
     list_tapes: bool,
     #[arg(long, help = "Only restore from complete backups")]
     complete: bool,
-    #[arg(long, help = "Select file deduplication method: copy, hardlink, symlink, reflink, hardlink-script, symlink-script, reflink-script", name="DEDUP_METHOD")]
+    #[arg(long, help = "Select file deduplication method: copy, hardlink, symlink, reflink, hardlink-script, symlink-script, reflink-script", name="DEDUP_METHOD", default_value="copy")]
     dedup_method: DedupMethod,
     #[arg(long, help = "Write file deduplication commands to a shell script file", name="SCRIPT_PATH", default_value="dedup_script.sh")]
     dedup_script_path: PathBuf,
@@ -908,6 +908,11 @@ impl Options {
             next().ok_or(eyre!("Could not find drive slot"))?;
         debug!("Found drive slot: {drive_slot:?}");
 
+        if slot == drive_slot.index {
+            warn!("Tape is already loaded in drive");
+            return Ok(())
+        }
+
         if drive_slot.status == StorageStatus::Full {
             debug!("Drive slot is full");
             let empty_slot = drive_slot.storage_element_index.
@@ -1361,6 +1366,7 @@ impl Options {
         let orig_tape = ls.iter().filter(|se| se.storage_type==StorageType::Drive).next();
         let orig_tape_label = orig_tape.map(|se| se.label.clone()).unwrap_or(None);
         let mut current_tape_label = orig_tape_label.clone();
+        let drive_slot = ls.iter().filter(|se| se.storage_type==StorageType::Drive).next().ok_or(eyre!("Could not find drive slot"))?;
 
         let sql = r#"
         select distinct t.id as tape_id,
@@ -1424,8 +1430,10 @@ impl Options {
             if current_tape_label.as_ref() != Some(&tape_label) {
                 let tape_slot = ls.iter().filter(|se| se.label.as_deref() == Some(&tape_label)).next();
                 if let Some(tape_slot) = tape_slot {
-                    self.unmount_tape()?;
-                    self.load_tape(tape_slot.index)?;
+                    if tape_slot.index != drive_slot.index {
+                        self.unmount_tape()?;
+                        self.load_tape(tape_slot.index)?;
+                    }
                     current_tape_label = Some(tape_label.clone());
 
                     let datetime = Utc.timestamp_opt(backup_date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
@@ -2555,9 +2563,12 @@ impl Options {
                   on f.id=b2f.file_id
                 join file f2
                   on f2.id=f.id -- file contents can come from the metadata files
-                  or (f2.checksum=f.checksum and not f2.is_duplicate) -- or from deduplicated contents
-                join tape t2
-                  on t2.id=f2.tape_id
+                  or (
+                    f2.checksum=f.checksum 
+                    and f2.size >= ?3
+                    and not f2.is_duplicate) -- or from deduplicated contents
+                join tape t
+                  on t.id=f2.tape_id
                 join backup2file b2f2
                   on b2f2.file_id=f2.id
                 join parent_backup pb2
@@ -2565,7 +2576,7 @@ impl Options {
               where metadata_rank=1
                 and contents_rank=1
               order by tape_id, file_id
-            "#, loaded_tapes=&loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+3)).collect::<Vec<String>>().join(","));
+            "#, loaded_tapes=&loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+4)).collect::<Vec<String>>().join(","));
             debug!("Running sql query:\n{sql}\n");
             let mut deleted_path = Option::<PathBuf>::None;
             let mut deleted_files = Vec::<FullBackup>::new();
@@ -2576,6 +2587,7 @@ impl Options {
                 let mut param_values  = Vec::<rusqlite::types::Value>::new();
                 param_values.push(backup.id.into());
                 param_values.push(drive_tape.into());
+                param_values.push((restore_cmd.min_dedup_size as i64).into());
                 for loaded_tape in loaded_tapes {
                     param_values.push(loaded_tape.into());
                 }
