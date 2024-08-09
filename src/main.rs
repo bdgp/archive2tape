@@ -2779,14 +2779,14 @@ impl Options {
                                 info!("{source:?} -> {dest:?} ({target:?})");
                             }
                             if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                                if dest.exists() {
+                                if std::fs::symlink_metadata(&dest).is_ok() {
                                     trace!("remove destination {dest:?}");
                                     std::fs::remove_file(&dest)?;
                                 }
                                 
                                 trace!("create symlink {dest:?} {target:?}");
                                 if let Err(e) = std::os::unix::fs::symlink(&target, &dest) {
-                                    if !dest.exists() || std::fs::read_link(&dest)? != dest {
+                                    if std::fs::read_link(&dest).ok().as_ref() != Some(&dest) {
                                         Err(e)?
                                     }
                                 }
@@ -2901,7 +2901,7 @@ impl Options {
                                             if let Some(contents) = &contents {
                                                 trace!("create symlink {dest:?} -> {contents:?}");
                                                 if let Err(e) = std::os::unix::fs::symlink(&contents, &dest) {
-                                                    if !dest.exists() || std::fs::read_link(&dest)? != dest {
+                                                    if std::fs::read_link(&dest).ok().as_ref() != Some(&dest) {
                                                         Err(e)?
                                                     }
                                                 }
