@@ -2534,9 +2534,9 @@ impl Options {
               from backup b
               join parent_backup pb 
                 on pb.parent_backup_id = b.id) 
-              select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, source_path, dest_path, source_mtime, mtime, size, filetype, symlink_target, checksum
+              select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, source_path, dest_path, source_mtime, mtime, size, filetype, symlink_target, checksum, is_duplicate
               from (
-                select b2f2.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, f2.id as file_id, f2.tape_id as tape_id, f2.path as source_path, f.path as dest_path, f2.mtime as source_mtime, f.mtime, f2.size, f.filetype, f.symlink_target, f2.checksum, 
+                select b2f2.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, f2.id as file_id, f2.tape_id as tape_id, f2.path as source_path, f.path as dest_path, f2.mtime as source_mtime, f.mtime, f2.size, f.filetype, f.symlink_target, f2.checksum, f2.is_duplicate,
                 pb.depth, 
                 (not f2.is_duplicate) as non_duplicate, 
                 (f.id=f2.id) as original_file,
