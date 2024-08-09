@@ -3400,6 +3400,7 @@ impl Options {
             let mut deleted_path = Option::<PathBuf>::None;
             let mut list_files = Vec::<ListFile>::new();
             let mut total_bytes = 0;
+            let mut dedup_bytes = 0;
             let mut checksums = HashSet::<Vec<u8>>::new();
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
@@ -3508,20 +3509,21 @@ impl Options {
                     symlink_target: symlink_target.unwrap_or_else(|| "".to_string()),
                 };
                 list_files.push(list_file);
+                total_bytes += full_backup.size;
                 if let Some(checksum) = &full_backup.checksum {
                     if ! checksums.contains(checksum) {
                         checksums.insert(checksum.clone());
-                        total_bytes += full_backup.size;
+                        dedup_bytes += full_backup.size;
                     }
                 }
                 else {
-                    total_bytes += full_backup.size;
+                    dedup_bytes += full_backup.size;
                 }
             }
             let mut table = tabled::Table::new(&list_files);
             table.with(tabled::settings::Style::sharp());
             println!("{table}");
-            println!("Total size: {total_size} ({total_bytes} bytes)", total_size=Size::from_bytes(total_bytes));
+            println!("Total size: {total_size} ({total_bytes} bytes); deduplicated: {dedup_size} ({dedup_bytes} bytes)", total_size=Size::from_bytes(total_bytes), dedup_size=Size::from_bytes(dedup_bytes));
         }
         Ok(())
     }
