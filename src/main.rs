@@ -36,7 +36,6 @@ use rand::{distributions::Alphanumeric, Rng};
 use filetime::FileTime;
 use linked_hash_map::LinkedHashMap;
 use nix::sys::stat::Mode;
-use nix::unistd::{Uid,Gid};
 use users::{Users, Groups};
 
 use log::{info, debug, error, warn, trace};
@@ -2758,7 +2757,7 @@ impl Options {
                                     Err(e) => Err(e)?,
                                 }
                                 trace!("chown {dest:?}");
-                                nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
                                 if let Some(md) = md {
                                     let current_mtime = FileTime::from_last_modification_time(&md);
                                     mtime = std::cmp::max(mtime, current_mtime.unix_seconds());
@@ -2793,7 +2792,7 @@ impl Options {
                                 }
 
                                 trace!("chown {dest:?}");
-                                nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                std::os::unix::fs::lchown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
                                 trace!("set mtime for {dest:?}");
                                 let filetime = FileTime::from_unix_time(full_backup.mtime, 0);
                                 filetime::set_symlink_file_times(&dest, filetime.clone(), filetime.clone())?;
@@ -2820,7 +2819,7 @@ impl Options {
                                     if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                         // set uid:gid
                                         trace!("chown {dest:?}");
-                                        nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                        std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
                                         // set mode
                                         trace!("chmod {dest:?}");
                                         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
@@ -2888,7 +2887,7 @@ impl Options {
                                                     }
                                                 }
                                                 trace!("chown {dest:?}");
-                                                nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                                std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
                                                 // set mode
                                                 trace!("chmod {dest:?}");
                                                 std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
@@ -2907,7 +2906,7 @@ impl Options {
                                                     }
                                                 }
                                                 trace!("chown {dest:?}");
-                                                nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                                std::os::unix::fs::lchown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
                                                 // set mode
                                                 trace!("chmod {dest:?}");
                                                 std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
@@ -2926,7 +2925,7 @@ impl Options {
                                                     }
                                                 }
                                                 trace!("chown {dest:?}");
-                                                nix::unistd::chown(&dest, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                                std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
                                                 // set mode
                                                 trace!("chmod {dest:?}");
                                                 std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
@@ -3023,7 +3022,7 @@ impl Options {
                                                 trace!("copying {contents:?} to {tmp_file:?}");
                                                 std::fs::copy(&contents, &tmp_file)?;
                                                 trace!("chown {tmp_file:?}");
-                                                nix::unistd::chown(&tmp_file, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                                std::os::unix::fs::chown(&tmp_file, Some(full_backup.uid), Some(full_backup.gid))?;
                                                 // set mode
                                                 trace!("chmod {tmp_file:?}");
                                                 std::fs::set_permissions(&tmp_file, std::fs::Permissions::from_mode(full_backup.mode))?;
@@ -3149,7 +3148,7 @@ impl Options {
                                                     trace!("copying {source:?} to {tmp_file:?}");
                                                     std::fs::copy(&source, &tmp_file)?;
                                                     trace!("chown {tmp_file:?}");
-                                                    nix::unistd::chown(&tmp_file, Some(Uid::from_raw(full_backup.uid)), Some(Gid::from_raw(full_backup.gid)))?;
+                                                    std::os::unix::fs::chown(&tmp_file, Some(full_backup.uid), Some(full_backup.gid))?;
                                                     // set mode
                                                     trace!("chmod {tmp_file:?}");
                                                     std::fs::set_permissions(&tmp_file, std::fs::Permissions::from_mode(full_backup.mode))?;
