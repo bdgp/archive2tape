@@ -143,6 +143,7 @@ dependencies = [
  "sha2",
  "shell-escape",
  "shell-quote",
+ "size",
  "stable-eyre",
  "stfu8",
  "sysinfo",
@@ -1254,6 +1255,12 @@ checksum = "a09e78d1f98bc5db3fa689ae39f90c0b9af72fe83b0bb4a13b9636edad92fcbd"
 dependencies = [
  "bstr",
 ]
+
+[[package]]
+name = "size"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fed904c7fb2856d868b92464fc8fa597fce366edea1a9cbfaa8cb5fe080bd6d"
 
 [[package]]
 name = "smallvec"

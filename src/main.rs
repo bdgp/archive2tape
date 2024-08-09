@@ -3,7 +3,7 @@ use derive_more::Display;
 use std::os::unix::prelude::MetadataExt;
 use std::path::PathBuf;
 use std::io::{BufRead, BufReader, Write};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashSet, HashMap};
 use std::os::unix::fs::PermissionsExt;
 
 use chrono::{TimeZone, Utc};
@@ -44,6 +44,7 @@ use serde_derive::{Deserialize, Serialize};
 use pager::Pager;
 use flexi_logger::{FileSpec, Criterion, Naming, Cleanup, Duplicate};
 use format_bytes::format_bytes;
+use size::Size;
 
 // /dev/sg0 lto5 drive
 // /dev/sg1 lto5 loader
@@ -2746,7 +2747,9 @@ impl Options {
                         FileType::Directory => {
                             trace!("is a directory");
                             if ! restore_cmd.list_tapes {
-                                info!("{source:?}/ -> {dest:?}/");
+                                if ! (dest.exists() && dest.is_dir()) {
+                                    info!("{source:?}/ -> {dest:?}/");
+                                }
                             }
                             let mut mtime = full_backup.mtime;
                             let md = std::fs::symlink_metadata(&dest).ok(); 
@@ -2776,7 +2779,9 @@ impl Options {
                             }
                             let target = full_backup.symlink_target.ok_or_else(|| eyre!("Symlink target is null!"))?;
                             if ! restore_cmd.list_tapes {
-                                info!("{source:?} -> {dest:?} ({target:?})");
+                                if ! (dest.exists() && dest.is_symlink() && std::fs::read_link(&dest).ok().as_ref() == Some(&target)) {
+                                    info!("{source:?} -> {dest:?} ({target:?})");
+                                }
                             }
                             if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
                                 if std::fs::symlink_metadata(&dest).is_ok() {
@@ -2823,6 +2828,14 @@ impl Options {
                                         // set mode
                                         trace!("chmod {dest:?}");
                                         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                        trace!("set mtime for {dest:?}");
+                                        // set the file's mtime
+                                        let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                        filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
+                                    }
+                                    if ! restore_cmd.list_tapes {
+                                        trace!("File {dest:?} is already up to date");
+                                        continue;
                                     }
                                     is_required = false;
                                 }
@@ -3036,7 +3049,6 @@ impl Options {
                                                 continue;
                                             }
                                             
-
                                             if ! restore_cmd.list_tapes {
                                                 info!("[TAPE] {source:?} -> {dest:?}");
                                             }
@@ -3125,9 +3137,7 @@ impl Options {
 
                                             // if --list-tapes was specified, skip the next section, since the tape
                                             // won't actually be loaded
-                                            // if is_required is false, then skip as well, since the file is already
-                                            // present
-                                            if restore_cmd.list_tapes || ! is_required {
+                                            if restore_cmd.list_tapes {
                                                 continue;
                                             }
 
@@ -3389,6 +3399,8 @@ impl Options {
             let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
             let mut deleted_path = Option::<PathBuf>::None;
             let mut list_files = Vec::<ListFile>::new();
+            let mut total_bytes = 0;
+            let mut checksums = HashSet::<Vec<u8>>::new();
             while let Some(full_backup) = rows_iter.next() {
                 let full_backup = full_backup?;
 
@@ -3496,10 +3508,20 @@ impl Options {
                     symlink_target: symlink_target.unwrap_or_else(|| "".to_string()),
                 };
                 list_files.push(list_file);
+                if let Some(checksum) = &full_backup.checksum {
+                    if ! checksums.contains(checksum) {
+                        checksums.insert(checksum.clone());
+                        total_bytes += full_backup.size;
+                    }
+                }
+                else {
+                    total_bytes += full_backup.size;
+                }
             }
             let mut table = tabled::Table::new(&list_files);
             table.with(tabled::settings::Style::sharp());
             println!("{table}");
+            println!("Total size: {total_size} ({total_bytes} bytes)", total_size=Size::from_bytes(total_bytes));
         }
         Ok(())
     }
