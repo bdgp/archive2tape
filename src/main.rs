@@ -2701,7 +2701,7 @@ impl Options {
 
                     // source path on tape
                     let full_backup_source_path = full_backup.source_path.strip_prefix("/").unwrap_or_else(|_| full_backup.source_path.as_path());
-                    let source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
+                    let mut source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
                         &source_path.as_path(),
                         &full_backup_source_path,
                     ].iter().collect::<PathBuf>().display().to_string())?));
@@ -3075,6 +3075,25 @@ impl Options {
                                                                 self.load_tape(se.index)?;
                                                                 self.mount_tape()?;
                                                                 current_tape_label = Some(tape.label.clone());
+
+                                                                // recompute source path
+                                                                let source_path = [
+                                                                    &self.ltfs_path, 
+                                                                    &PathBuf::from(if let Some(l) = &current_tape_label {l} else {"unknown"}),
+                                                                    &PathBuf::from("backup"),
+                                                                    &PathBuf::from(
+                                                                        self.db.file_stem().unwrap_or(&OsString::from("backup"))),
+                                                                    &PathBuf::from(&timestamp),
+                                                                    &PathBuf::from(&backup.uuid),
+                                                                    &PathBuf::from("rootfs"),
+                                                                ].iter().collect::<PathBuf>();
+                                                                debug!("source_path={source_path:?}");
+                                                                let full_backup_source_path = full_backup.source_path.strip_prefix("/").unwrap_or_else(|_| full_backup.source_path.as_path());
+                                                                source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
+                                                                    &source_path.as_path(),
+                                                                    &full_backup_source_path,
+                                                                ].iter().collect::<PathBuf>().display().to_string())?));
+                                                                trace!("source={source:?}");
                                                             }
                                                         }
                                                     }
