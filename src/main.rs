@@ -2536,45 +2536,48 @@ impl Options {
                 on pb.parent_backup_id = b.id) 
               select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, source_path, dest_path, source_mtime, mtime, size, filetype, symlink_target, checksum, is_duplicate
               from (
-                select b2f2.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, f2.id as file_id, f2.tape_id as tape_id, f2.path as source_path, f.path as dest_path, f2.mtime as source_mtime, f.mtime, f2.size, f.filetype, f.symlink_target, f2.checksum, f2.is_duplicate,
-                pb.depth, 
-                (not f2.is_duplicate) as non_duplicate, 
-                (f.id=f2.id) as original_file,
-                (t.label=?2) as drive_tape,
-                (t.label in ({loaded_tapes})) as loaded_tape,
-                pb2.depth as depth2, 
+                select *,
                 row_number() over (
-                    partition by f.path 
-                    order by pb.depth -- get most recent backup2file record for file metadata
-                ) as metadata_rank,
-                row_number() over (
-                    partition by f.path 
-                    order by (not f2.is_duplicate) desc, -- prefer non-duplicate contents records
-                        (f.id=f2.id) desc, -- prefer original contents record
-                        (t.label=?2) desc, -- prefer contents in current drive tape
-                        (t.label in ({loaded_tapes})) desc, -- prefer contents in loaded tapes
-                        pb2.depth desc, -- prefer oldest backup2file record for file contents
-                        f2.id -- use file_id as tiebreaker
+                    partition by dest_path
+                    order by non_duplicate desc, -- prefer non-duplicate contents records
+                        original_file desc, -- prefer original contents record
+                        drive_tape desc, -- prefer contents in current drive tape
+                        loaded_tape desc, -- prefer contents in loaded tapes
+                        depth2 desc, -- prefer oldest backup2file record for file contents
+                        f2_id -- use file_id as tiebreaker
                     ) as contents_rank
-                from parent_backup pb
-                join backup2file b2f
-                  on b2f.backup_id=pb.id
-                join file f
-                  on f.id=b2f.file_id
-                join file f2
-                  on f2.id=f.id -- file contents can come from the metadata files
-                  or (
-                    f2.checksum=f.checksum 
-                    and f2.size >= ?3
-                    and not f2.is_duplicate) -- or from deduplicated contents
-                join tape t
-                  on t.id=f2.tape_id
-                join backup2file b2f2
-                  on b2f2.file_id=f2.id
-                join parent_backup pb2
-                  on pb2.id=b2f2.backup_id) s
-              where metadata_rank=1
-                and contents_rank=1
+                from (
+                  select b2f2.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, f2.id as file_id, f2.tape_id as tape_id, f2.path as source_path, f.path as dest_path, f2.mtime as source_mtime, f.mtime, f2.size, f.filetype, f.symlink_target, f2.checksum, f2.is_duplicate,
+                  pb.depth, 
+                  (not f2.is_duplicate) as non_duplicate, 
+                  (f.id=f2.id) as original_file,
+                  (t.label=?2) as drive_tape,
+                  (t.label in ({loaded_tapes})) as loaded_tape,
+                  pb2.depth as depth2, 
+                  f2.id as f2_id,
+                  row_number() over (
+                      partition by f.path 
+                      order by pb.depth -- get most recent backup2file record for file metadata
+                  ) as metadata_rank
+                  from parent_backup pb
+                  join backup2file b2f
+                    on b2f.backup_id=pb.id
+                  join file f
+                    on f.id=b2f.file_id
+                  join file f2
+                    on f2.id=f.id -- file contents can come from the metadata files
+                    or (
+                      f2.checksum=f.checksum 
+                      and f2.size >= ?3
+                      and not f2.is_duplicate) -- or from deduplicated contents
+                  join tape t
+                    on t.id=f2.tape_id
+                  join backup2file b2f2
+                    on b2f2.file_id=f2.id
+                  join parent_backup pb2
+                    on pb2.id=b2f2.backup_id) s
+                where metadata_rank=1) s
+              where contents_rank=1
               order by tape_id, file_id
             "#, loaded_tapes=&loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+4)).collect::<Vec<String>>().join(","));
             debug!("Running sql query:\n{sql}\n");
@@ -2598,7 +2601,6 @@ impl Options {
                 let mut stmt = conn.prepare(sql)?;
                 while let Some(full_backup) = rows_iter.next() {
                     let full_backup = full_backup?;
-                    trace!("Handling full_backup record: {full_backup:?}");
 
                     if let Some(deleted_path) = &deleted_path {
                         if full_backup.dest_path.starts_with(deleted_path) {
@@ -2678,6 +2680,7 @@ impl Options {
                             }
                         }
                     }
+                    trace!("Handling full_backup record: {full_backup:?}");
 
                     let backup = backups.get(&full_backup.backup_id).
                         ok_or_else(|| eyre!("Could not find backup record for id {id}", id=full_backup.backup_id))?;
@@ -2779,7 +2782,7 @@ impl Options {
                             }
                             let target = full_backup.symlink_target.ok_or_else(|| eyre!("Symlink target is null!"))?;
                             if ! restore_cmd.list_tapes {
-                                if ! (dest.exists() && dest.is_symlink() && std::fs::read_link(&dest).ok().as_ref() == Some(&target)) {
+                                if ! (dest.is_symlink() && std::fs::read_link(&dest).ok().as_ref() == Some(&target)) {
                                     info!("{source:?} -> {dest:?} ({target:?})");
                                 }
                             }
@@ -3050,7 +3053,7 @@ impl Options {
                                             }
                                             
                                             if ! restore_cmd.list_tapes {
-                                                info!("[TAPE] {source:?} -> {dest:?}");
+                                                info!("[COPY] {source:?} -> {dest:?}");
                                             }
 
                                             // make sure correct tape is loaded and mounted
@@ -3252,9 +3255,15 @@ impl Options {
                restore_cmd.dedup_method == DedupMethod::SymlinkScript || 
                restore_cmd.dedup_method == DedupMethod::ReflinkScript 
             {
-                info!("Deduplication script written to {dedup_script_path:?}", dedup_script_path=restore_cmd.dedup_script_path);
-                info!("Run the script using the following command: sh {dedup_script_path}", 
-                    dedup_script_path=String::from_utf8_lossy(&Sh::quote(&restore_cmd.dedup_script_path)));
+                if let Some(mut dedup_script) = dedup_script {
+                    dedup_script.flush()?;
+                    info!("Deduplication script written to {dedup_script_path:?}", dedup_script_path=restore_cmd.dedup_script_path);
+                    info!("Run the script using the following command: sh {dedup_script_path}", 
+                        dedup_script_path=String::from_utf8_lossy(&Sh::quote(&restore_cmd.dedup_script_path)));
+                }
+                else {
+                    info!("Deduplication script not written because no files were deduplicated.");
+                }
             }
         }
         Ok(())
