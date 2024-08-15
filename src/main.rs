@@ -165,6 +165,8 @@ struct RestoreCmd {
     dedup_script_path: PathBuf,
     #[arg(long, help = "Remap base directory paths when writing deduplication scripts", name="SOURCE=DEST")] 
     dedup_script_remap: Vec<String>,
+    #[arg(long, help = "Strip path prefix from destination path", name="PREFIX")] 
+    strip_prefix: Vec<PathBuf>,
     #[arg(help = "Glob patterns to filter restore files", name="PATTERN")]
     patterns: Vec<Pattern>,
 }
@@ -2713,10 +2715,16 @@ impl Options {
 
                     // destination path on storage
                     let full_backup_dest_path = full_backup.dest_path.strip_prefix("/").unwrap_or_else(|_| full_backup.dest_path.as_path());
-                    let dest = [
+                    let mut dest = [
                         &restore_cmd.restore_path.as_path(),
                         &full_backup_dest_path,
                     ].iter().collect::<PathBuf>();
+                    for prefix in &restore_cmd.strip_prefix {
+                        if let Ok(stripped) = dest.strip_prefix(prefix) {
+                            dest = stripped.to_path_buf();
+                            break;
+                        }
+                    }
                     trace!("dest={dest:?}");
 
                     if let Some(parent) = dest.parent() {
@@ -2872,10 +2880,20 @@ impl Options {
                                                 let rows_iter = serde_rusqlite::from_rows::<File>(rows);
                                                 for contents_file in rows_iter {
                                                     let contents_file = contents_file?;
-                                                    if let Some(metadata) = contents_file.path.symlink_metadata().ok() {
-                                                        if contents_file.path.exists() && 
-                                                            contents_file.path.is_file() && 
-                                                            !contents_file.path.is_symlink() && 
+                                                    let mut contents_file_dest_path = [
+                                                        restore_cmd.restore_path.as_path(),
+                                                        &contents_file.path,
+                                                    ].iter().collect::<PathBuf>();
+                                                    for prefix in &restore_cmd.strip_prefix {
+                                                        if let Ok(stripped) = contents_file_dest_path.strip_prefix(prefix) {
+                                                            contents_file_dest_path = stripped.to_path_buf();
+                                                            break;
+                                                        }
+                                                    }
+                                                    if let Some(metadata) = contents_file_dest_path.symlink_metadata().ok() {
+                                                        if contents_file_dest_path.exists() && 
+                                                            contents_file_dest_path.is_file() && 
+                                                            !contents_file_dest_path.is_symlink() && 
                                                             metadata.size() == full_backup.size && 
                                                             metadata.mtime() == full_backup.source_mtime
                                                         {
@@ -3253,7 +3271,8 @@ impl Options {
             info!("Restore complete");
             if restore_cmd.dedup_method == DedupMethod::HardlinkScript || 
                restore_cmd.dedup_method == DedupMethod::SymlinkScript || 
-               restore_cmd.dedup_method == DedupMethod::ReflinkScript 
+               restore_cmd.dedup_method == DedupMethod::ReflinkScript ||
+               restore_cmd.dedup_method == DedupMethod::CopyScript
             {
                 if let Some(mut dedup_script) = dedup_script {
                     dedup_script.flush()?;
