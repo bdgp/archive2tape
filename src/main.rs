@@ -2941,11 +2941,8 @@ impl Options {
                                                 }
                                                 trace!("chown {dest:?}");
                                                 std::os::unix::fs::lchown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
-                                                // set mode
-                                                trace!("chmod {dest:?}");
-                                                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
-                                                trace!("set mtime for {dest:?}");
                                                 // set the file's mtime
+                                                trace!("set mtime for {dest:?}");
                                                 let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
                                                 filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
                                             }
@@ -3003,33 +3000,63 @@ impl Options {
                                                             Sh::quote(&contents),
                                                             Sh::quote(&dest),
                                                         ))?;
+                                                        dedup_script.write(&format_bytes!(b"chown {}:{} {}", 
+                                                            full_backup.uid,
+                                                            full_backup.gid,
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                        dedup_script.write(&format_bytes!(b"chmod {} {}", 
+                                                            format!("{:o}", full_backup.mode).as_bytes(),
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                        dedup_script.write(&format_bytes!(b"touch -d @{} {}", 
+                                                            full_backup.mtime,
+                                                            Sh::quote(&dest),
+                                                        ))?;
                                                     }
                                                     else if dedup_method == DedupMethod::CopyScript {
                                                         dedup_script.write(&format_bytes!(b"cp -vf {} {}",
                                                             Sh::quote(&contents),
                                                             Sh::quote(&dest),
                                                         ))?;
+                                                        dedup_script.write(&format_bytes!(b"chown {}:{} {}", 
+                                                            full_backup.uid,
+                                                            full_backup.gid,
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                        dedup_script.write(&format_bytes!(b"chmod {} {}", 
+                                                            format!("{:o}", full_backup.mode).as_bytes(),
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                        dedup_script.write(&format_bytes!(b"touch -d @{} {}", 
+                                                            full_backup.mtime,
+                                                            Sh::quote(&dest),
+                                                        ))?;
                                                     }
-                                                    else {
-                                                        dedup_script.write(&format_bytes!(b"ln -{}vf {} {}", 
-                                                            if dedup_method == DedupMethod::SymlinkScript {"s".as_bytes()} else {"".as_bytes()},
+                                                    else if dedup_method == DedupMethod::HardlinkScript {
+                                                        dedup_script.write(&format_bytes!(b"ln -vf {} {}", 
                                                             Sh::quote(&contents),
                                                             Sh::quote(&dest),
                                                         ))?;
                                                     }
-                                                    dedup_script.write(&format_bytes!(b"chown {}:{} {}", 
-                                                        full_backup.uid,
-                                                        full_backup.gid,
-                                                        Sh::quote(&dest),
-                                                    ))?;
-                                                    dedup_script.write(&format_bytes!(b"chmod {} {}", 
-                                                        format!("{:o}", full_backup.mode).as_bytes(),
-                                                        Sh::quote(&dest),
-                                                    ))?;
-                                                    dedup_script.write(&format_bytes!(b"touch -d @{} {}", 
-                                                        full_backup.mtime,
-                                                        Sh::quote(&dest),
-                                                    ))?;
+                                                    else if dedup_method == DedupMethod::SymlinkScript {
+                                                        dedup_script.write(&format_bytes!(b"ln -svf {} {}", 
+                                                            Sh::quote(&contents),
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                        dedup_script.write(&format_bytes!(b"chown {}:{} --no-dereference {}", 
+                                                            full_backup.uid,
+                                                            full_backup.gid,
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                        dedup_script.write(&format_bytes!(b"touch --no-dereference -d @{} {}", 
+                                                            full_backup.mtime,
+                                                            Sh::quote(&dest),
+                                                        ))?;
+                                                    }
+                                                    else {
+                                                        bail!("Unknown deduplication method: {dedup_method:?}"); 
+                                                    }
                                                 }
                                             }
                                         },
