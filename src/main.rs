@@ -2504,6 +2504,12 @@ impl Options {
         if let Some(backup) = backup {
             debug!("Found backup record: {backup:?}");
 
+            let datetime = Utc.timestamp_opt(backup.date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
+            let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
+            let timestamp = format!("{newdate}");
+
+            info!("Restoring files from backup at {timestamp} to {restore_path:?}", restore_path=restore_cmd.restore_path);
+
             // get the complete set of backup records for reference
             let mut backups = LinkedHashMap::<i64, Backup>::new();
             {
@@ -2781,7 +2787,7 @@ impl Options {
                         },
                         FileType::Symlink => {
                             trace!("is a symlink");
-                            if dest.exists() && restore_cmd.noclobber {
+                            if restore_cmd.noclobber && dest.symlink_metadata().is_ok() {
                                 continue;
                             }
                             if ! dest.is_symlink() && dest.is_dir() {
@@ -2876,13 +2882,17 @@ impl Options {
                                                 dedup_method = DedupMethod::Copy;
                                             }
                                             else {
+                                                trace!("Looking for checksum {checksum:?} in database", checksum=full_backup.checksum);
                                                 let rows = stmt.query(params![full_backup.checksum, stfu8::encode_u8_pretty(full_backup.dest_path.as_os_str().as_bytes())])?;
                                                 let rows_iter = serde_rusqlite::from_rows::<File>(rows);
                                                 for contents_file in rows_iter {
                                                     let contents_file = contents_file?;
+                                                    trace!("Found contents_file record: {contents_file:?}");
+                                                    trace!("restore_path={restore_path:?}", restore_path=restore_cmd.restore_path);
+                                                    trace!("contents_file.path={contents_file_path:?}", contents_file_path=contents_file.path);
                                                     let mut contents_file_dest_path = [
                                                         restore_cmd.restore_path.as_path(),
-                                                        &contents_file.path,
+                                                        &contents_file.path.strip_prefix("/").unwrap_or_else(|_| contents_file.path.as_path()),
                                                     ].iter().collect::<PathBuf>();
                                                     for prefix in &restore_cmd.strip_prefix {
                                                         if let Ok(stripped) = contents_file_dest_path.strip_prefix(prefix) {
@@ -2890,14 +2900,28 @@ impl Options {
                                                             break;
                                                         }
                                                     }
+                                                    trace!("Found contents_file_dest_path: {contents_file_dest_path:?}");
                                                     if let Some(metadata) = contents_file_dest_path.symlink_metadata().ok() {
+                                                        trace!("exists={exists:?} is_file={is_file:?} is_symlink={is_symlink:?} size={size:?} mtime={mtime:?}, full_backup.size={full_backup_size}, full_backup.source_mtime={full_backup_source_mtime}",
+                                                            exists=contents_file_dest_path.exists(),
+                                                            is_file=contents_file_dest_path.is_file(),
+                                                            is_symlink=contents_file_dest_path.is_symlink(),
+                                                            size=metadata.size(),
+                                                            mtime=metadata.mtime(),
+                                                            full_backup_size=full_backup.size,
+                                                            full_backup_source_mtime=full_backup.source_mtime,
+                                                        );
                                                         if contents_file_dest_path.exists() && 
                                                             contents_file_dest_path.is_file() && 
                                                             !contents_file_dest_path.is_symlink() && 
                                                             metadata.size() == full_backup.size && 
                                                             metadata.mtime() == full_backup.source_mtime
                                                         {
-                                                            contents = Some(contents_file.path.clone());
+                                                            contents = Some(contents_file_dest_path.clone());
+                                                            trace!("Found contents {contents_file_dest_path:?} for file {dest:?}");
+                                                            if ! restore_cmd.list_tapes {
+                                                                info!("[DEDUP] {contents_file_dest_path:?} -> {dest:?}");
+                                                            }
                                                             break;
                                                         }
                                                     }
@@ -2996,60 +3020,60 @@ impl Options {
                                                         }
                                                     }
                                                     if dedup_method == DedupMethod::ReflinkScript {
-                                                        dedup_script.write(&format_bytes!(b"cp -vf --reflink {} {}",
+                                                        dedup_script.write(&format_bytes!(b"cp -vf --reflink {} {}\n",
                                                             Sh::quote(&contents),
                                                             Sh::quote(&dest),
                                                         ))?;
-                                                        dedup_script.write(&format_bytes!(b"chown {}:{} {}", 
+                                                        dedup_script.write(&format_bytes!(b"chown {}:{} {}\n", 
                                                             full_backup.uid,
                                                             full_backup.gid,
                                                             Sh::quote(&dest),
                                                         ))?;
-                                                        dedup_script.write(&format_bytes!(b"chmod {} {}", 
-                                                            format!("{:o}", full_backup.mode).as_bytes(),
+                                                        dedup_script.write(&format_bytes!(b"chmod {} {}\n", 
+                                                            format!("{:o}", full_backup.mode & 0o7777).as_bytes(),
                                                             Sh::quote(&dest),
                                                         ))?;
-                                                        dedup_script.write(&format_bytes!(b"touch -d @{} {}", 
+                                                        dedup_script.write(&format_bytes!(b"touch -d @{} {}\n", 
                                                             full_backup.mtime,
                                                             Sh::quote(&dest),
                                                         ))?;
                                                     }
                                                     else if dedup_method == DedupMethod::CopyScript {
-                                                        dedup_script.write(&format_bytes!(b"cp -vf {} {}",
+                                                        dedup_script.write(&format_bytes!(b"cp -vf {} {}\n",
                                                             Sh::quote(&contents),
                                                             Sh::quote(&dest),
                                                         ))?;
-                                                        dedup_script.write(&format_bytes!(b"chown {}:{} {}", 
+                                                        dedup_script.write(&format_bytes!(b"chown {}:{} {}\n", 
                                                             full_backup.uid,
                                                             full_backup.gid,
                                                             Sh::quote(&dest),
                                                         ))?;
-                                                        dedup_script.write(&format_bytes!(b"chmod {} {}", 
-                                                            format!("{:o}", full_backup.mode).as_bytes(),
+                                                        dedup_script.write(&format_bytes!(b"chmod {} {}\n", 
+                                                            format!("{:o}", full_backup.mode & 0o7777).as_bytes(),
                                                             Sh::quote(&dest),
                                                         ))?;
-                                                        dedup_script.write(&format_bytes!(b"touch -d @{} {}", 
+                                                        dedup_script.write(&format_bytes!(b"touch -d @{} {}\n", 
                                                             full_backup.mtime,
                                                             Sh::quote(&dest),
                                                         ))?;
                                                     }
                                                     else if dedup_method == DedupMethod::HardlinkScript {
-                                                        dedup_script.write(&format_bytes!(b"ln -vf {} {}", 
+                                                        dedup_script.write(&format_bytes!(b"ln -vf {} {}\n", 
                                                             Sh::quote(&contents),
                                                             Sh::quote(&dest),
                                                         ))?;
                                                     }
                                                     else if dedup_method == DedupMethod::SymlinkScript {
-                                                        dedup_script.write(&format_bytes!(b"ln -svf {} {}", 
+                                                        dedup_script.write(&format_bytes!(b"ln -svf {} {}\n", 
                                                             Sh::quote(&contents),
                                                             Sh::quote(&dest),
                                                         ))?;
-                                                        dedup_script.write(&format_bytes!(b"chown {}:{} --no-dereference {}", 
+                                                        dedup_script.write(&format_bytes!(b"chown {}:{} --no-dereference {}\n", 
                                                             full_backup.uid,
                                                             full_backup.gid,
                                                             Sh::quote(&dest),
                                                         ))?;
-                                                        dedup_script.write(&format_bytes!(b"touch --no-dereference -d @{} {}", 
+                                                        dedup_script.write(&format_bytes!(b"touch --no-dereference -d @{} {}\n", 
                                                             full_backup.mtime,
                                                             Sh::quote(&dest),
                                                         ))?;
@@ -3076,7 +3100,6 @@ impl Options {
 
                                             // perform a deduplicated copy from destination to destination
                                             if let Some(contents) = &contents {
-                                                info!("[DEDUP] {contents:?} -> {dest:?}");
                                                 trace!("contents={contents:?}");
                                                 trace!("tmp_file={tmp_file:?}");
                                                 trace!("dest={dest:?}");
