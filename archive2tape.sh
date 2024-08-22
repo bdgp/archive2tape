@@ -6,7 +6,7 @@ fi
 set -x
 
 #./target/release/archive2tape --db /srv/tape-archives/db/iarpa.db --log /srv/tape-archives/log/iarpa.log --create-db backup /data/iarpa
-#./target/release/archive2tape --db /srv/tape-archives/db/smorf.db --log /srv/tape-archives/log/smorf.log --create-db backup /data/smorf
+./target/release/archive2tape --db /srv/tape-archives/db/smorf.db --log /srv/tape-archives/log/smorf.log --create-db backup /data/smorf
 ./target/release/archive2tape --db /srv/tape-archives/db/teirex.db --log /srv/tape-archives/log/teirex.log --create-db backup /data/teirex
 #./target/release/archive2tape --db /srv/tape-archives/db/mnt-local-teirex.db --log /srv/tape-archives/log/mnt-local-teirex.log --create-db backup /mnt/local/teirex
 ./target/release/archive2tape --db /srv/tape-archives/db/flash_ldrd.db --log /srv/tape-archives/log/flash_ldrd.log --create-db backup /data/flash_ldrd

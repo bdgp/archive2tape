@@ -1125,12 +1125,16 @@ impl Options {
                 if let Some(label) = &tape.label {
                     // if the tape is not marked as full
                     if let Some(t) = full_tapes.get(label) {
-                        if self.ignore_tape.is_match(label) {
-                            debug!("Ignoring tape: {tape:?}");
-                            continue;
-                        }
-                        if ! tape_tags.is_empty() {
-                            let mut tags = &Vec::<String>::new();
+                        trace!("Skipping full tape: {t:?}");
+                        continue;
+                    }
+                    if self.ignore_tape.is_match(label) {
+                        debug!("Ignoring tape: {tape:?}");
+                        continue;
+                    }
+                    if ! tape_tags.is_empty() {
+                        let mut tags = &Vec::<String>::new();
+                        if let Some(t) = non_full_tapes.get(label) {
                             if let Some(t) = db_tape_tags.get(&t.id) {
                                 tags = t;
                             }
@@ -1139,47 +1143,47 @@ impl Options {
                                 continue;
                             }
                         }
-                        if tape.storage_type != StorageType::Drive {
-                            // if ltfs filesystem is mounted
-                            if self.is_mounted()? {
-                                debug!("Unmounting LTFS filesystem");
-                                // attempt to unmount the tape
-                                self.unmount_tape()?;
-                            }
-                            // load the tape into the drive
-                            debug!("Loading usable tape: {tape:?}");
-                            self.load_tape(tape.index)?;
-                        }
-
-                        // if no db record exists for tape, attempt to format the tape
-                        // if tape is already formatted, formatting will fail
-                        if !non_full_tapes.contains_key(label) {
-                            if ! self.is_mounted()? {
-                                debug!("Tape has no db record, try formatting it");
-                                self.format_ltfs()?;
-                            }
-                            // insert a db record for the tape
-                            debug!("insert tape database record");
-                            self.insert_tape_record(&label)?;
-                        }
-
-                        self.fix_mountpoint()?;
-
-                        // if ltfs filesystem is not mounted
-                        if !self.is_mounted()? {
-                            debug!("mount the tape LTFS filesystem");
-                            // attempt to mount the tape
-                            self.mount_tape()?;
-                        }
-
-                        // check for available space
-                        if self.is_tape_full()? {
-                            debug!("LTFS filesystem is full, set tape record as full, and try another tape");
-                            self.set_tape_record_as_full(label)?;
-                            continue;
-                        }
-                        return Ok((**tape).clone())
                     }
+                    if tape.storage_type != StorageType::Drive {
+                        // if ltfs filesystem is mounted
+                        if self.is_mounted()? {
+                            debug!("Unmounting LTFS filesystem");
+                            // attempt to unmount the tape
+                            self.unmount_tape()?;
+                        }
+                        // load the tape into the drive
+                        debug!("Loading usable tape: {tape:?}");
+                        self.load_tape(tape.index)?;
+                    }
+
+                    // if no db record exists for tape, attempt to format the tape
+                    // if tape is already formatted, formatting will fail
+                    if !non_full_tapes.contains_key(label) {
+                        if ! self.is_mounted()? {
+                            debug!("Tape has no db record, try formatting it");
+                            self.format_ltfs()?;
+                        }
+                        // insert a db record for the tape
+                        debug!("insert tape database record");
+                        self.insert_tape_record(&label)?;
+                    }
+
+                    self.fix_mountpoint()?;
+
+                    // if ltfs filesystem is not mounted
+                    if !self.is_mounted()? {
+                        debug!("mount the tape LTFS filesystem");
+                        // attempt to mount the tape
+                        self.mount_tape()?;
+                    }
+
+                    // check for available space
+                    if self.is_tape_full()? {
+                        debug!("LTFS filesystem is full, set tape record as full, and try another tape");
+                        self.set_tape_record_as_full(label)?;
+                        continue;
+                    }
+                    return Ok((**tape).clone())
                 }
             }
         }
