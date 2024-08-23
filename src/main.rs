@@ -1908,10 +1908,12 @@ impl Options {
                                         }
 
                                         // ignore any entries that are not one of: directory, file, symlink
+                                        trace!("check dir/file/symlink for  {path:?}");
                                         if !path.is_dir() && !path.is_file() && !path.is_symlink() {
                                             continue 'PATHS;
                                         }
                                         // check include filters
+                                        trace!("check include filters for {path:?}");
                                         if !backup_cmd.include_regex.is_empty() {
                                             let mut to_include = false;
                                             for i in &backup_cmd.include_regex {
@@ -1936,6 +1938,7 @@ impl Options {
                                                 continue 'PATHS;
                                             }
                                         }
+                                        trace!("check exclude filters for {path:?}");
                                         // check exclude filters
                                         if !backup_cmd.exclude_regex.is_empty() {
                                             for e in &backup_cmd.exclude_regex {
@@ -1951,6 +1954,7 @@ impl Options {
                                                 }
                                             }
                                         }
+                                        trace!("check extra exclude filters for {path:?}");
                                         if !backup_cmd.ignore_extra_exclude && !extra_exclude.is_empty() {
                                             for e in extra_exclude {
                                                 if e.matches_path(&path) {
@@ -1960,6 +1964,7 @@ impl Options {
                                         }
 
                                         // get file metadata
+                                        trace!("get file metadata for {path:?}");
                                         let metadata = match std::fs::symlink_metadata(&path) {
                                             Ok(m) => m,
                                             Err(e) => {
@@ -1970,6 +1975,7 @@ impl Options {
                                         let filetype = if path.is_symlink() {FileType::Symlink} else if path.is_dir() {FileType::Directory} else {FileType::File};
 
                                         // get symlink target if applicable
+                                        trace!("get symlink target for {path:?}");
                                         let target = if path.is_symlink() {
                                             match std::fs::read_link(&path) {
                                                 Ok(t) => Some(t),
@@ -1982,11 +1988,12 @@ impl Options {
                                         else { None };
 
                                         // if file exists in backup but metadata has changed, only insert a new backup2file record
+                                        trace!("check if file exists in backup but metadata changed for {path:?}");
                                         if let Some(parent_record) = backup_index.remove(&path) {
                                             if metadata.mtime() == parent_record.mtime && metadata.size() == parent_record.size && filetype == parent_record.filetype && target == parent_record.symlink_target 
                                             {
                                                 if parent_record.uid == metadata.uid() && parent_record.gid == metadata.gid() && parent_record.mode == metadata.mode() {
-                                                    //trace!("Skipping file {path:?}, already backed up");
+                                                    trace!("Skipping file {path:?}, already backed up");
                                                     continue 'PATHS;
                                                 }
                                                 // add backup2file records to the database for the deleted file
@@ -2155,14 +2162,14 @@ impl Options {
 
                                                 // compute file checksum, find a candidate contents file, set a placeholder symlink on tape, if tape is full, load new tape
                                                 if !backup_cmd.nochecksums {
-                                                    info!("Computing checksum for {path:?} ... ");
+                                                    debug!("Computing checksum for {path:?} ... ");
                                                     let mut hasher = Sha256::new();
                                                     let mut file = std::fs::File::open(&path)?;
                                                     let _ = std::io::copy(&mut file, &mut hasher)?;
                                                     let hash_bytes = hasher.finalize();
                                                     checksum = Some(Vec::from(hash_bytes.as_slice()));
                                                     if let Some(checksum) = &checksum {
-                                                        info!("Computed checksum for {path:?} ... {checksum}", checksum=hex::encode(&checksum));
+                                                        debug!("Computed checksum for {path:?} ... {checksum}", checksum=hex::encode(&checksum));
                                                     }
                                                     if metadata.size() >= backup_cmd.min_dedup_size {
                                                         let sql = r#"
