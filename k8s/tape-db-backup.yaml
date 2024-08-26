@@ -48,31 +48,31 @@ spec:
               chmod u=s,go=x /bin/su-exec
 
               # /data/iarpa
-              #su-exec bbooth archive2tape --db /srv/tape-archives/db/iarpa.db --log /srv/tape-archives/log/iarpa.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/iarpa /data/felix_transition_materials
+              #(cd /data/iarpa && mountpoint .) && su-exec bbooth archive2tape --db /srv/tape-archives/db/iarpa.db --log /srv/tape-archives/log/iarpa.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/iarpa /data/felix_transition_materials
 
               # /data/teirex
-              su-exec bbooth archive2tape --db /srv/tape-archives/db/teirex.db --log /srv/tape-archives/log/teirex.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/teirex
+              (cd /data/teirex && mountpoint .) && su-exec bbooth archive2tape --db /srv/tape-archives/db/teirex.db --log /srv/tape-archives/log/teirex.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/teirex
 
               # /mnt/local/teirex
-              su-exec bbooth archive2tape --db /srv/tape-archives/db/mnt-local-teirex.db --log /srv/tape-archives/log/mnt-local-teirex.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /mnt/local/teirex
+              (cd /mnt/local/teirex && mountpoint .) && su-exec bbooth archive2tape --db /srv/tape-archives/db/mnt-local-teirex.db --log /srv/tape-archives/log/mnt-local-teirex.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /mnt/local/teirex
 
               # /data/flash_ldrd
-              su-exec bbooth archive2tape --db /srv/tape-archives/db/flash_ldrd.db --log /srv/tape-archives/log/flash_ldrd.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/flash_ldrd
+              (cd /data/flash_ldrd && mountpoint .) && su-exec bbooth archive2tape --db /srv/tape-archives/db/flash_ldrd.db --log /srv/tape-archives/log/flash_ldrd.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/flash_ldrd
 
               # /data/seqdata
-              su-exec bbooth archive2tape --db /srv/tape-archives/db/seqdata.db --log /srv/tape-archives/log/seqdata.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/seqdata
+              (cd /data/seqdata && mountpoint .) && su-exec bbooth archive2tape --db /srv/tape-archives/db/seqdata.db --log /srv/tape-archives/log/seqdata.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/seqdata
 
               # /data/analysis
-              su-exec bbooth archive2tape --db /srv/tape-archives/db/analysis.db --log /srv/tape-archives/log/analysis.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/analysis
+              (cd /data/analysis && mountpoint .) && su-exec bbooth archive2tape --db /srv/tape-archives/db/analysis.db --log /srv/tape-archives/log/analysis.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/analysis
 
               # /data/insitu-production
-              su-exec bbooth archive2tape --db /srv/tape-archives/db/insitu-production.db --log /srv/tape-archives/log/insitu-production.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/insitu-production
+              (cd /data/insitu-production && mountpoint .) && su-exec bbooth archive2tape --db /srv/tape-archives/db/insitu-production.db --log /srv/tape-archives/log/insitu-production.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/insitu-production
 
               # /data/insitu-public
-              su-exec bbooth archive2tape --db /srv/tape-archives/db/insitu-public.db --log /srv/tape-archives/log/insitu-public.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/insitu-public
+              (cd /data/insitu-public && mountpoint .) && su-exec bbooth archive2tape --db /srv/tape-archives/db/insitu-public.db --log /srv/tape-archives/log/insitu-public.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/insitu-public
 
               # /data/smorf
-              su-exec bbooth archive2tape --db /srv/tape-archives/db/smorf.db --log /srv/tape-archives/log/smorf.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/smorf
+              (cd /data/smorf && mountpoint .) && su-exec bbooth archive2tape --db /srv/tape-archives/db/smorf.db --log /srv/tape-archives/log/smorf.log --create-db --mount-command 'su-exec root nsenter -t 1 -m -u -i -n -p systemctl start ltfs' --unmount-command 'su-exec root fusermount -u /media/lto8/%l' backup /data/smorf
 
               su-exec bbooth sqlite-backup /srv/tape-archives/db
               su-exec bbooth rsync -av /srv/tape-archives/log /backup/
