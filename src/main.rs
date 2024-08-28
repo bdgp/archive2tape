@@ -51,19 +51,9 @@ use size::Size;
 // /dev/sg2 lto8 drive
 // /dev/sg4 lto8 loader
 
-// Checksums:
-// serial checksumming - done
-// set restore deduplication method --dedup-method copy, hardlink, symlink, reflink, hardlink-script, symlink-script, reflink-script --dedup-script-path --dedup-script-remap - done
-// restore with deduplication - done
-// backfill-checksums subcommand - done
-// validate-checksums subcommand - done
-// source_file_id -> is_duplicate - done
-// --threads --skip-checksums flag for backup and restore - done
-// tape tags - done
-// parallel checksumming 
-// add extra exclude pattern for @eaDir, .DS_Store, ._*, .AppleDouble, .thumbs_db, etc. - done
+// TODO: parallel checksumming 
 
-static EXTRA_EXCLUDE_PATTERNS: [&str; 12] = [
+static EXTRA_EXCLUDE_PATTERNS: [&str; 14] = [
     "@eaDir",
     "#snapshot",
     ".DS_Store",
@@ -76,6 +66,8 @@ static EXTRA_EXCLUDE_PATTERNS: [&str; 12] = [
     ".fseventsd",
     ".Spotlight-V100",
     ".DocumentRevisions-V100",
+    "@Recycle",
+    ".snap",
 ];
 
 #[derive(Parser, Debug)]
