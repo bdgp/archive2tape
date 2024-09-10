@@ -3339,6 +3339,7 @@ impl Options {
                 if let Some(orig_tape_index) = ls.iter().find(|se| if let Some(l) = &se.label {l==label} else {false}).map(|se| se.index) {
                     self.unmount_tape()?;
                     self.load_tape(orig_tape_index)?;
+                    self.mount_tape()?;
                 }
             }
         }
