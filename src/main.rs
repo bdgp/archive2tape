@@ -2531,725 +2531,592 @@ impl Options {
             // the metadata is in the most recent backup2file for each file
             // but the contents on tape are in the oldest backup2file for each file, or
             // the contents are deduplicated through checksum
-            let ls = self.loader_status()?;
-            let drive_tape = ls.iter().filter(|t| t.storage_type == StorageType::Drive && t.status == StorageStatus::Full).map(|t| t.clone()).next().map(|t| t.label).unwrap_or(None);
-            let loaded_tapes = ls.iter().filter(|t| t.status == StorageStatus::Full).flat_map(|t| t.label.clone()).collect::<Vec<String>>();
+            let mut missing_tapes = HashSet::<String>::new();
+            let mut found_tapes = HashSet::<String>::new();
+            loop {
+                let ls = self.loader_status()?;
+                let drive_tape = ls.iter().filter(|t| t.storage_type == StorageType::Drive && t.status == StorageStatus::Full).map(|t| t.clone()).next().map(|t| t.label).unwrap_or(None);
+                let loaded_tapes = ls.iter().filter(|t| t.status == StorageStatus::Full).flat_map(|t| t.label.clone()).collect::<Vec<String>>();
+                let missing_tape_ids = tapes.values().filter(|t| missing_tapes.contains(&t.label)).map(|t| t.id).collect::<Vec<i64>>();
 
-            let sql = format!(r#"
-              with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
-              select id, date_created, uuid, parent_backup_id, 0 as depth
-              from backup
-              where id = ?1
-              union all
-              select b.id, b.date_created, b.uuid, b.parent_backup_id, pb.depth+1 as depth
-              from backup b
-              join parent_backup pb 
-                on pb.parent_backup_id = b.id) 
-              select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, source_path, dest_path, source_mtime, mtime, size, filetype, symlink_target, checksum, is_duplicate
-              from (
-                select *,
-                row_number() over (
-                    partition by dest_path
-                    order by non_duplicate desc, -- prefer non-duplicate contents records
-                        original_file desc, -- prefer original contents record
-                        drive_tape desc, -- prefer contents in current drive tape
-                        loaded_tape desc, -- prefer contents in loaded tapes
-                        depth2 desc, -- prefer oldest backup2file record for file contents
-                        f2_id -- use file_id as tiebreaker
-                    ) as contents_rank
+                let sql = format!(r#"
+                with recursive parent_backup(id, date_created, uuid, parent_backup_id, depth) as (
+                select id, date_created, uuid, parent_backup_id, 0 as depth
+                from backup
+                where id = ?1
+                union all
+                select b.id, b.date_created, b.uuid, b.parent_backup_id, pb.depth+1 as depth
+                from backup b
+                join parent_backup pb 
+                    on pb.parent_backup_id = b.id) 
+                select backup_id, uid, gid, mode, is_deleted, file_id, tape_id, source_path, dest_path, source_mtime, mtime, size, filetype, symlink_target, checksum, is_duplicate
                 from (
-                  select b2f2.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, f2.id as file_id, f2.tape_id as tape_id, f2.path as source_path, f.path as dest_path, f2.mtime as source_mtime, f.mtime, f2.size, f.filetype, f.symlink_target, f2.checksum, f2.is_duplicate,
-                  pb.depth, 
-                  (not f2.is_duplicate) as non_duplicate, 
-                  (f.id=f2.id) as original_file,
-                  (t.label=?2) as drive_tape,
-                  (t.label in ({loaded_tapes})) as loaded_tape,
-                  pb2.depth as depth2, 
-                  f2.id as f2_id,
-                  row_number() over (
-                      partition by f.path 
-                      order by pb.depth -- get most recent backup2file record for file metadata
-                  ) as metadata_rank
-                  from parent_backup pb
-                  join backup2file b2f
-                    on b2f.backup_id=pb.id
-                  join file f
-                    on f.id=b2f.file_id
-                  join file f2
-                    on f2.id=f.id -- file contents can come from the metadata files
-                    or (
-                      f2.checksum=f.checksum 
-                      and f2.size >= ?3
-                      and not f2.is_duplicate) -- or from deduplicated contents
-                  join tape t
-                    on t.id=f2.tape_id
-                  join backup2file b2f2
-                    on b2f2.file_id=f2.id
-                  join parent_backup pb2
-                    on pb2.id=b2f2.backup_id) s
-                where metadata_rank=1) s
-              where contents_rank=1
-              order by tape_id, file_id
-            "#, loaded_tapes=&loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+4)).collect::<Vec<String>>().join(","));
-            debug!("Running sql query:\n{sql}\n");
-            let mut deleted_path = Option::<PathBuf>::None;
-            let mut deleted_files = Vec::<FullBackup>::new();
-            let mut old_tape_id = Option::<i64>::None;
-            let mut old_dir = Vec::<(PathBuf, i64)>::new();
-            {
-                let mut stmt = conn.prepare(&sql)?;
-                let mut param_values  = Vec::<rusqlite::types::Value>::new();
-                param_values.push(backup.id.into());
-                param_values.push(drive_tape.into());
-                param_values.push((restore_cmd.min_dedup_size as i64).into());
-                for loaded_tape in loaded_tapes {
-                    param_values.push(loaded_tape.into());
-                }
-                let rows = stmt.query(rusqlite::params_from_iter(param_values))?;
-                let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
+                    select *,
+                    row_number() over (
+                        partition by dest_path
+                        order by non_duplicate desc, -- prefer non-duplicate contents records
+                            original_file desc, -- prefer original contents record
+                            drive_tape desc, -- prefer contents in current drive tape
+                            loaded_tape desc, -- prefer contents in loaded tapes
+                            depth2 desc, -- prefer oldest backup2file record for file contents
+                            f2_id -- use file_id as tiebreaker
+                        ) as contents_rank
+                    from (
+                    select b2f2.backup_id, b2f.uid, b2f.gid, b2f.mode, b2f.is_deleted, f2.id as file_id, f2.tape_id as tape_id, f2.path as source_path, f.path as dest_path, f2.mtime as source_mtime, f.mtime, f2.size, f.filetype, f.symlink_target, f2.checksum, f2.is_duplicate,
+                    pb.depth, 
+                    (not f2.is_duplicate) as non_duplicate, 
+                    (f.id=f2.id) as original_file,
+                    (t.label=?2) as drive_tape,
+                    (t.label in ({loaded_tapes})) as loaded_tape,
+                    pb2.depth as depth2, 
+                    f2.id as f2_id,
+                    row_number() over (
+                        partition by f.path 
+                        order by pb.depth -- get most recent backup2file record for file metadata
+                    ) as metadata_rank
+                    from parent_backup pb
+                    join backup2file b2f
+                        on b2f.backup_id=pb.id
+                    join file f
+                        on f.id=b2f.file_id
+                    join file f2
+                        on f2.id=f.id -- file contents can come from the metadata files
+                        or (
+                        f2.checksum=f.checksum 
+                        and f2.size >= ?3
+                        and not f2.is_duplicate) -- or from deduplicated contents
+                    join tape t
+                        on t.id=f2.tape_id
+                    join backup2file b2f2
+                        on b2f2.file_id=f2.id
+                    join parent_backup pb2
+                        on pb2.id=b2f2.backup_id) s
+                    where metadata_rank=1) s
+                where contents_rank=1
+                  {tape_id_filter}
+                order by tape_id, file_id
+                "#, 
+                    loaded_tapes=&loaded_tapes.iter().enumerate().map(|(i,_)| format!("?{}",i+4)).collect::<Vec<String>>().join(","),
+                    tape_id_filter=if !missing_tape_ids.is_empty() {format!("and tape_id in ({})", missing_tape_ids.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","))} else {"".to_string()});
+                debug!("Running sql query:\n{sql}\n");
+                let mut deleted_path = Option::<PathBuf>::None;
+                let mut deleted_files = Vec::<FullBackup>::new();
+                let mut old_tape_id = Option::<i64>::None;
+                let mut old_dir = Vec::<(PathBuf, i64)>::new();
+                {
+                    let mut stmt = conn.prepare(&sql)?;
+                    let mut param_values  = Vec::<rusqlite::types::Value>::new();
+                    param_values.push(backup.id.into());
+                    param_values.push(drive_tape.into());
+                    param_values.push((restore_cmd.min_dedup_size as i64).into());
+                    for loaded_tape in loaded_tapes.clone() {
+                        param_values.push(loaded_tape.into());
+                    }
+                    let rows = stmt.query(rusqlite::params_from_iter(param_values))?;
+                    let mut rows_iter = serde_rusqlite::from_rows::<FullBackup>(rows);
 
-                let sql = r#"select * from file f where checksum=?1 and path != ?2 order by id desc"#;
-                let mut stmt = conn.prepare(sql)?;
-                while let Some(full_backup) = rows_iter.next() {
-                    let full_backup = full_backup?;
+                    let sql = r#"select * from file f where checksum=?1 and path != ?2 order by id desc"#;
+                    let mut stmt = conn.prepare(sql)?;
 
-                    if let Some(deleted_path) = &deleted_path {
-                        if full_backup.dest_path.starts_with(deleted_path) {
-                            trace!("Path {path:?} is in already deleted directory {deleted_path:?}, not restoring path", path=full_backup.dest_path);
+                    missing_tapes.clear();
+                    while let Some(full_backup) = rows_iter.next() {
+                        let full_backup = full_backup?;
+
+                        if let Some(deleted_path) = &deleted_path {
+                            if full_backup.dest_path.starts_with(deleted_path) {
+                                trace!("Path {path:?} is in already deleted directory {deleted_path:?}, not restoring path", path=full_backup.dest_path);
+                                continue;
+                            }
+                        }
+                        if full_backup.is_deleted {
+                            if full_backup.filetype == FileType::Directory {
+                                deleted_path = Some(full_backup.dest_path.clone());
+                            }
+                            trace!("Path {:?} is marked as deleted, skipping", full_backup.dest_path);
                             continue;
                         }
-                    }
-                    if full_backup.is_deleted {
-                        if full_backup.filetype == FileType::Directory {
-                            deleted_path = Some(full_backup.dest_path.clone());
-                        }
-                        trace!("Path {:?} is marked as deleted, skipping", full_backup.dest_path);
-                        continue;
-                    }
 
-                    if ! restore_cmd.patterns.is_empty() {
-                        let mut found_match = false;
-                        for pattern in &restore_cmd.patterns {
-                            if pattern.matches_path(&full_backup.dest_path) {
-                                found_match = true;
+                        if ! restore_cmd.patterns.is_empty() {
+                            let mut found_match = false;
+                            for pattern in &restore_cmd.patterns {
+                                if pattern.matches_path(&full_backup.dest_path) {
+                                    found_match = true;
+                                    break;
+                                }
+                                let recursive_pattern = Pattern::new(&regex_replace!(r#"/+(\*\*+)?$"#, pattern.as_str(), |_,_| "/**"))?;
+                                if recursive_pattern.matches_path(&full_backup.dest_path) {
+                                    found_match = true;
+                                    break;
+                                }
+                            }
+                            if ! found_match {
+                                continue;
+                            }
+                        }
+                        // check include filters
+                        if !restore_cmd.include_regex.is_empty() {
+                            let mut to_include = false;
+                            for i in &restore_cmd.include_regex {
+                                if i.is_match(full_backup.dest_path.as_os_str().as_bytes()) {
+                                    to_include = true;
+                                    break;
+                                }
+                            }
+                            if !to_include {
+                                continue;
+                            }
+                        }
+                        if !restore_cmd.include.is_empty() {
+                            let mut to_include = false;
+                            for i in &restore_cmd.include {
+                                if i.matches_path(&full_backup.dest_path) {
+                                    to_include = true;
+                                    break;
+                                }
+                            }
+                            if !to_include {
+                                continue;
+                            }
+                        }
+                        // check exclude filters
+                        if !restore_cmd.exclude_regex.is_empty() {
+                            for e in &restore_cmd.exclude_regex {
+                                if e.is_match(full_backup.dest_path.as_os_str().as_bytes()) {
+                                    continue;
+                                }
+                            }
+                        }
+                        if !restore_cmd.exclude.is_empty() {
+                            for e in &restore_cmd.exclude {
+                                if e.matches_path(&full_backup.dest_path) {
+                                    continue;
+                                }
+                            }
+                        }
+                        if !restore_cmd.ignore_extra_exclude && !extra_exclude.is_empty() {
+                            for e in extra_exclude {
+                                if e.matches_path(&full_backup.dest_path) {
+                                    continue;
+                                }
+                            }
+                        }
+                        trace!("Handling full_backup record: {full_backup:?}");
+
+                        let backup = backups.get(&full_backup.backup_id).
+                            ok_or_else(|| eyre!("Could not find backup record for id {id}", id=full_backup.backup_id))?;
+
+                        let date_created = backup.date_created;
+                        let datetime = Utc.timestamp_opt(date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
+                        let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
+                        let timestamp = format!("{newdate}");
+                        debug!("timestamp={timestamp}");
+
+                        let source_path = [
+                            &self.ltfs_path, 
+                            &PathBuf::from(if let Some(l) = &current_tape_label {l} else {"unknown"}),
+                            &PathBuf::from("backup"),
+                            &PathBuf::from(
+                                self.db.file_stem().unwrap_or(&OsString::from("backup"))),
+                            &PathBuf::from(&timestamp),
+                            &PathBuf::from(&backup.uuid),
+                            &PathBuf::from("rootfs"),
+                        ].iter().collect::<PathBuf>();
+                        debug!("source_path={source_path:?}");
+
+                        // source path on tape
+                        let full_backup_source_path = full_backup.source_path.strip_prefix("/").unwrap_or_else(|_| full_backup.source_path.as_path());
+                        let mut source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
+                            &source_path.as_path(),
+                            &full_backup_source_path,
+                        ].iter().collect::<PathBuf>().display().to_string())?));
+                        trace!("source={source:?}");
+
+                        // destination path on storage
+                        let full_backup_dest_path = full_backup.dest_path.strip_prefix("/").unwrap_or_else(|_| full_backup.dest_path.as_path());
+                        let mut dest = [
+                            &restore_cmd.restore_path.as_path(),
+                            &full_backup_dest_path,
+                        ].iter().collect::<PathBuf>();
+                        for prefix in &restore_cmd.strip_prefix {
+                            if let Ok(stripped) = dest.strip_prefix(prefix) {
+                                dest = stripped.to_path_buf();
                                 break;
                             }
-                            let recursive_pattern = Pattern::new(&regex_replace!(r#"/+(\*\*+)?$"#, pattern.as_str(), |_,_| "/**"))?;
-                            if recursive_pattern.matches_path(&full_backup.dest_path) {
-                                found_match = true;
-                                break;
-                            }
                         }
-                        if ! found_match {
-                            continue;
-                        }
-                    }
-                    // check include filters
-                    if !restore_cmd.include_regex.is_empty() {
-                        let mut to_include = false;
-                        for i in &restore_cmd.include_regex {
-                            if i.is_match(full_backup.dest_path.as_os_str().as_bytes()) {
-                                to_include = true;
-                                break;
-                            }
-                        }
-                        if !to_include {
-                            continue;
-                        }
-                    }
-                    if !restore_cmd.include.is_empty() {
-                        let mut to_include = false;
-                        for i in &restore_cmd.include {
-                            if i.matches_path(&full_backup.dest_path) {
-                                to_include = true;
-                                break;
-                            }
-                        }
-                        if !to_include {
-                            continue;
-                        }
-                    }
-                    // check exclude filters
-                    if !restore_cmd.exclude_regex.is_empty() {
-                        for e in &restore_cmd.exclude_regex {
-                            if e.is_match(full_backup.dest_path.as_os_str().as_bytes()) {
-                                continue;
-                            }
-                        }
-                    }
-                    if !restore_cmd.exclude.is_empty() {
-                        for e in &restore_cmd.exclude {
-                            if e.matches_path(&full_backup.dest_path) {
-                                continue;
-                            }
-                        }
-                    }
-                    if !restore_cmd.ignore_extra_exclude && !extra_exclude.is_empty() {
-                        for e in extra_exclude {
-                            if e.matches_path(&full_backup.dest_path) {
-                                continue;
-                            }
-                        }
-                    }
-                    trace!("Handling full_backup record: {full_backup:?}");
+                        trace!("dest={dest:?}");
 
-                    let backup = backups.get(&full_backup.backup_id).
-                        ok_or_else(|| eyre!("Could not find backup record for id {id}", id=full_backup.backup_id))?;
-
-                    let date_created = backup.date_created;
-                    let datetime = Utc.timestamp_opt(date_created, 0).single().ok_or_else(|| eyre!("Could not convert date_created to DateTime<Utc>"))?;
-                    let newdate = datetime.format("%Y-%m-%d_%H.%M.%S");
-                    let timestamp = format!("{newdate}");
-                    debug!("timestamp={timestamp}");
-
-                    let source_path = [
-                        &self.ltfs_path, 
-                        &PathBuf::from(if let Some(l) = &current_tape_label {l} else {"unknown"}),
-                        &PathBuf::from("backup"),
-                        &PathBuf::from(
-                            self.db.file_stem().unwrap_or(&OsString::from("backup"))),
-                        &PathBuf::from(&timestamp),
-                        &PathBuf::from(&backup.uuid),
-                        &PathBuf::from("rootfs"),
-                    ].iter().collect::<PathBuf>();
-                    debug!("source_path={source_path:?}");
-
-                    // source path on tape
-                    let full_backup_source_path = full_backup.source_path.strip_prefix("/").unwrap_or_else(|_| full_backup.source_path.as_path());
-                    let mut source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
-                        &source_path.as_path(),
-                        &full_backup_source_path,
-                    ].iter().collect::<PathBuf>().display().to_string())?));
-                    trace!("source={source:?}");
-
-                    // destination path on storage
-                    let full_backup_dest_path = full_backup.dest_path.strip_prefix("/").unwrap_or_else(|_| full_backup.dest_path.as_path());
-                    let mut dest = [
-                        &restore_cmd.restore_path.as_path(),
-                        &full_backup_dest_path,
-                    ].iter().collect::<PathBuf>();
-                    for prefix in &restore_cmd.strip_prefix {
-                        if let Ok(stripped) = dest.strip_prefix(prefix) {
-                            dest = stripped.to_path_buf();
-                            break;
-                        }
-                    }
-                    trace!("dest={dest:?}");
-
-                    if let Some(parent) = dest.parent() {
-                        // set the mtime of the previous directory if it's done
-                        // being written
-                        while ! old_dir.is_empty() {
-                            if let Some((od, mtime)) = old_dir.last() {
-                                match parent.strip_prefix(&od) {
-                                    Ok(_) => {
-                                        break;
-                                    },
-                                    Err(_) => {
-                                        trace!("set mtime of old_dir {od:?} to {mtime}");
-                                        let filetime = FileTime::from_unix_time(*mtime, 0);
-                                        if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                                            filetime::set_file_times(od, filetime.clone(), filetime.clone())?;
-                                        }
-                                        old_dir.pop();
-                                    },
-                                }
-                            }
-                        }
-                        trace!("create parent directories for {parent:?}");
-                        if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                    }
-                    // transfer the file
-                    trace!("Checking type of full_backup {full_backup:?}");
-                    match full_backup.filetype {
-                        FileType::Directory => {
-                            trace!("is a directory");
-                            if ! restore_cmd.list_tapes {
-                                if ! (dest.exists() && dest.is_dir()) {
-                                    info!("{source:?}/ -> {dest:?}/");
-                                }
-                            }
-                            let mut mtime = full_backup.mtime;
-                            let md = std::fs::symlink_metadata(&dest).ok(); 
-                            if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                                trace!("mkdir {dest:?} with mode {mode}", mode=full_backup.mode);
-                                match nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode)) {
-                                    Ok(_) | Err(nix::errno::Errno::EEXIST) => (),
-                                    Err(e) => Err(e)?,
-                                }
-                                trace!("chown {dest:?}");
-                                std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
-                                if let Some(md) = md {
-                                    let current_mtime = FileTime::from_last_modification_time(&md);
-                                    mtime = std::cmp::max(mtime, current_mtime.unix_seconds());
-                                }
-                            }
-                            old_dir.push((dest, mtime));
-                        },
-                        FileType::Symlink => {
-                            trace!("is a symlink");
-                            if restore_cmd.noclobber && dest.symlink_metadata().is_ok() {
-                                continue;
-                            }
-                            if ! dest.is_symlink() && dest.is_dir() {
-                                error!("Destination {dest:?} is a directory instead of a symlink!");
-                                continue;
-                            }
-                            let target = full_backup.symlink_target.ok_or_else(|| eyre!("Symlink target is null!"))?;
-                            if ! restore_cmd.list_tapes {
-                                if ! (dest.is_symlink() && std::fs::read_link(&dest).ok().as_ref() == Some(&target)) {
-                                    info!("{source:?} -> {dest:?} ({target:?})");
-                                }
-                            }
-                            if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                                if std::fs::symlink_metadata(&dest).is_ok() {
-                                    trace!("remove destination {dest:?}");
-                                    std::fs::remove_file(&dest)?;
-                                }
-                                
-                                trace!("create symlink {dest:?} {target:?}");
-                                if let Err(e) = std::os::unix::fs::symlink(&target, &dest) {
-                                    if std::fs::read_link(&dest).ok().as_ref() != Some(&dest) {
-                                        Err(e)?
+                        if let Some(parent) = dest.parent() {
+                            // set the mtime of the previous directory if it's done
+                            // being written
+                            while ! old_dir.is_empty() {
+                                if let Some((od, mtime)) = old_dir.last() {
+                                    match parent.strip_prefix(&od) {
+                                        Ok(_) => {
+                                            break;
+                                        },
+                                        Err(_) => {
+                                            trace!("set mtime of old_dir {od:?} to {mtime}");
+                                            let filetime = FileTime::from_unix_time(*mtime, 0);
+                                            if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                                                filetime::set_file_times(od, filetime.clone(), filetime.clone())?;
+                                            }
+                                            old_dir.pop();
+                                        },
                                     }
                                 }
-
-                                trace!("chown {dest:?}");
-                                std::os::unix::fs::lchown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
-                                trace!("set mtime for {dest:?}");
-                                let filetime = FileTime::from_unix_time(full_backup.mtime, 0);
-                                filetime::set_symlink_file_times(&dest, filetime.clone(), filetime.clone())?;
                             }
-                        },
-                        FileType::File => {
-                            trace!("{dest:?} is a file");
-                            let mut is_required = true;
-                            if dest.exists() {
-                                if restore_cmd.noclobber {
-                                    debug!("File {dest:?} already exists, skipping because noclobber is set");
+                            trace!("create parent directories for {parent:?}");
+                            if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                        }
+                        // transfer the file
+                        trace!("Checking type of full_backup {full_backup:?}");
+                        match full_backup.filetype {
+                            FileType::Directory => {
+                                trace!("is a directory");
+                                if ! restore_cmd.list_tapes {
+                                    if ! (dest.exists() && dest.is_dir()) {
+                                        info!("{source:?}/ -> {dest:?}/");
+                                    }
+                                }
+                                let mut mtime = full_backup.mtime;
+                                let md = std::fs::symlink_metadata(&dest).ok(); 
+                                if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                                    trace!("mkdir {dest:?} with mode {mode}", mode=full_backup.mode);
+                                    match nix::unistd::mkdir(&dest, Mode::from_bits_truncate(full_backup.mode)) {
+                                        Ok(_) | Err(nix::errno::Errno::EEXIST) => (),
+                                        Err(e) => Err(e)?,
+                                    }
+                                    trace!("chown {dest:?}");
+                                    std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
+                                    if let Some(md) = md {
+                                        let current_mtime = FileTime::from_last_modification_time(&md);
+                                        mtime = std::cmp::max(mtime, current_mtime.unix_seconds());
+                                    }
+                                }
+                                old_dir.push((dest, mtime));
+                            },
+                            FileType::Symlink => {
+                                trace!("is a symlink");
+                                if restore_cmd.noclobber && dest.symlink_metadata().is_ok() {
                                     continue;
-                                } 
+                                }
                                 if ! dest.is_symlink() && dest.is_dir() {
-                                    error!("Destination {dest:?} is a directory instead of a file!");
+                                    error!("Destination {dest:?} is a directory instead of a symlink!");
                                     continue;
                                 }
-
-                                // if mtime and size is the same, skip copying the file
-                                trace!("check if file {dest:?} is already up to date");
-                                let attr = std::fs::symlink_metadata(&dest)?;
-                                if dest.is_file() && attr.mtime() == full_backup.mtime && attr.size() == full_backup.size {
-                                    trace!("file {dest:?} is already up to date");
-                                    if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                                        // set uid:gid
-                                        trace!("chown {dest:?}");
-                                        std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
-                                        // set mode
-                                        trace!("chmod {dest:?}");
-                                        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
-                                        trace!("set mtime for {dest:?}");
-                                        // set the file's mtime
-                                        let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
-                                        filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
+                                let target = full_backup.symlink_target.ok_or_else(|| eyre!("Symlink target is null!"))?;
+                                if ! restore_cmd.list_tapes {
+                                    if ! (dest.is_symlink() && std::fs::read_link(&dest).ok().as_ref() == Some(&target)) {
+                                        info!("{source:?} -> {dest:?} ({target:?})");
                                     }
-                                    if ! restore_cmd.list_tapes {
-                                        trace!("File {dest:?} is already up to date");
-                                        continue;
-                                    }
-                                    is_required = false;
                                 }
-                                else {
-                                    if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                                        // remove existing destination file to break any hard links
-                                        trace!("remove existing file {dest:?}");
+                                if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                                    if std::fs::symlink_metadata(&dest).is_ok() {
+                                        trace!("remove destination {dest:?}");
                                         std::fs::remove_file(&dest)?;
                                     }
-                                }
-                            }
-                            if is_required {
-                                trace!("Tape {:?} is required due to file {:?}", 
-                                    tapes.get(&full_backup.tape_id).map(|t| t.label.clone()),
-                                    dest,
-                                );
-                            }
-                            if let Some(dest_path) = dest.parent() {
-                                if let Some(file_name) = dest.file_name() {
-                                    // potential source contents path on destination storage for deduplication
-                                    let mut contents = Option::<PathBuf>::None;
-                                    let mut dedup_method = restore_cmd.dedup_method.clone();
-                                    match dedup_method {
-                                        DedupMethod::Hardlink | DedupMethod::Symlink | DedupMethod::Reflink | 
-                                        DedupMethod::HardlinkScript | DedupMethod::SymlinkScript | DedupMethod::ReflinkScript => {
-                                            if full_backup.size <= restore_cmd.min_dedup_size {
-                                                dedup_method = DedupMethod::Copy;
-                                            }
-                                            else {
-                                                trace!("Looking for checksum {checksum:?} in database", checksum=full_backup.checksum);
-                                                let rows = stmt.query(params![full_backup.checksum, stfu8::encode_u8_pretty(full_backup.dest_path.as_os_str().as_bytes())])?;
-                                                let rows_iter = serde_rusqlite::from_rows::<File>(rows);
-                                                for contents_file in rows_iter {
-                                                    let contents_file = contents_file?;
-                                                    trace!("Found contents_file record: {contents_file:?}");
-                                                    trace!("restore_path={restore_path:?}", restore_path=restore_cmd.restore_path);
-                                                    trace!("contents_file.path={contents_file_path:?}", contents_file_path=contents_file.path);
-                                                    let mut contents_file_dest_path = [
-                                                        restore_cmd.restore_path.as_path(),
-                                                        &contents_file.path.strip_prefix("/").unwrap_or_else(|_| contents_file.path.as_path()),
-                                                    ].iter().collect::<PathBuf>();
-                                                    for prefix in &restore_cmd.strip_prefix {
-                                                        if let Ok(stripped) = contents_file_dest_path.strip_prefix(prefix) {
-                                                            contents_file_dest_path = stripped.to_path_buf();
-                                                            break;
-                                                        }
-                                                    }
-                                                    trace!("Found contents_file_dest_path: {contents_file_dest_path:?}");
-                                                    if let Some(metadata) = contents_file_dest_path.symlink_metadata().ok() {
-                                                        trace!("exists={exists:?} is_file={is_file:?} is_symlink={is_symlink:?} size={size:?} mtime={mtime:?}, full_backup.size={full_backup_size}, full_backup.source_mtime={full_backup_source_mtime}",
-                                                            exists=contents_file_dest_path.exists(),
-                                                            is_file=contents_file_dest_path.is_file(),
-                                                            is_symlink=contents_file_dest_path.is_symlink(),
-                                                            size=metadata.size(),
-                                                            mtime=metadata.mtime(),
-                                                            full_backup_size=full_backup.size,
-                                                            full_backup_source_mtime=full_backup.source_mtime,
-                                                        );
-                                                        if contents_file_dest_path.exists() && 
-                                                            contents_file_dest_path.is_file() && 
-                                                            !contents_file_dest_path.is_symlink() && 
-                                                            metadata.size() == full_backup.size && 
-                                                            metadata.mtime() == full_backup.source_mtime
-                                                        {
-                                                            contents = Some(contents_file_dest_path.clone());
-                                                            trace!("Found contents {contents_file_dest_path:?} for file {dest:?}");
-                                                            if ! restore_cmd.list_tapes {
-                                                                info!("[DEDUP] {contents_file_dest_path:?} -> {dest:?}");
-                                                            }
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                // fall back to copying if the contents file is not in the correct state
-                                                if contents.is_none() {
-                                                    dedup_method = DedupMethod::Copy;
-                                                }
-                                            }
+                                    
+                                    trace!("create symlink {dest:?} {target:?}");
+                                    if let Err(e) = std::os::unix::fs::symlink(&target, &dest) {
+                                        if std::fs::read_link(&dest).ok().as_ref() != Some(&dest) {
+                                            Err(e)?
                                         }
-                                        _ => {}
                                     }
 
-                                    match dedup_method {
-                                        DedupMethod::Hardlink => { 
-                                            if let Some(contents) = &contents {
-                                                trace!("create hardlink {dest:?} -> {contents:?}");
-                                                if let Err(e) = std::fs::hard_link(&contents, &dest) {
-                                                    if !dest.exists() {
-                                                        Err(e)?
-                                                    }
+                                    trace!("chown {dest:?}");
+                                    std::os::unix::fs::lchown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
+                                    trace!("set mtime for {dest:?}");
+                                    let filetime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                    filetime::set_symlink_file_times(&dest, filetime.clone(), filetime.clone())?;
+                                }
+                            },
+                            FileType::File => {
+                                trace!("{dest:?} is a file");
+                                let mut is_required = true;
+                                if dest.exists() {
+                                    if restore_cmd.noclobber {
+                                        debug!("File {dest:?} already exists, skipping because noclobber is set");
+                                        continue;
+                                    } 
+                                    if ! dest.is_symlink() && dest.is_dir() {
+                                        error!("Destination {dest:?} is a directory instead of a file!");
+                                        continue;
+                                    }
+
+                                    // if mtime and size is the same, skip copying the file
+                                    trace!("check if file {dest:?} is already up to date");
+                                    let attr = std::fs::symlink_metadata(&dest)?;
+                                    if dest.is_file() && attr.mtime() == full_backup.mtime && attr.size() == full_backup.size {
+                                        trace!("file {dest:?} is already up to date");
+                                        if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                                            // set uid:gid
+                                            trace!("chown {dest:?}");
+                                            std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
+                                            // set mode
+                                            trace!("chmod {dest:?}");
+                                            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                            trace!("set mtime for {dest:?}");
+                                            // set the file's mtime
+                                            let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                            filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
+                                        }
+                                        if ! restore_cmd.list_tapes {
+                                            trace!("File {dest:?} is already up to date");
+                                            continue;
+                                        }
+                                        is_required = false;
+                                    }
+                                    else {
+                                        if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                                            // remove existing destination file to break any hard links
+                                            trace!("remove existing file {dest:?}");
+                                            std::fs::remove_file(&dest)?;
+                                        }
+                                    }
+                                }
+                                if is_required {
+                                    trace!("Tape {:?} is required due to file {:?}", 
+                                        tapes.get(&full_backup.tape_id).map(|t| t.label.clone()),
+                                        dest,
+                                    );
+                                }
+                                if let Some(dest_path) = dest.parent() {
+                                    if let Some(file_name) = dest.file_name() {
+                                        // potential source contents path on destination storage for deduplication
+                                        let mut contents = Option::<PathBuf>::None;
+                                        let mut dedup_method = restore_cmd.dedup_method.clone();
+                                        match dedup_method {
+                                            DedupMethod::Hardlink | DedupMethod::Symlink | DedupMethod::Reflink | 
+                                            DedupMethod::HardlinkScript | DedupMethod::SymlinkScript | DedupMethod::ReflinkScript => {
+                                                if full_backup.size <= restore_cmd.min_dedup_size {
+                                                    dedup_method = DedupMethod::Copy;
                                                 }
-                                                trace!("chown {dest:?}");
-                                                std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
-                                                // set mode
-                                                trace!("chmod {dest:?}");
-                                                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
-                                                trace!("set mtime for {dest:?}");
-                                                // set the file's mtime
-                                                let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
-                                                filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
-                                            }
-                                        },
-                                        DedupMethod::Symlink => { 
-                                            if let Some(contents) = &contents {
-                                                trace!("create symlink {dest:?} -> {contents:?}");
-                                                if let Err(e) = std::os::unix::fs::symlink(&contents, &dest) {
-                                                    if std::fs::read_link(&dest).ok().as_ref() != Some(&dest) {
-                                                        Err(e)?
-                                                    }
-                                                }
-                                                trace!("chown {dest:?}");
-                                                std::os::unix::fs::lchown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
-                                                // set the file's mtime
-                                                trace!("set mtime for {dest:?}");
-                                                let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
-                                                filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
-                                            }
-                                        },
-                                        DedupMethod::Reflink => { 
-                                            if let Some(contents) = &contents {
-                                                trace!("create reflink {dest:?} -> {contents:?}");
-                                                if let Err(e) = reflink_copy::reflink(&contents, &dest) {
-                                                    if !dest.exists() {
-                                                        Err(e)?
-                                                    }
-                                                }
-                                                trace!("chown {dest:?}");
-                                                std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
-                                                // set mode
-                                                trace!("chmod {dest:?}");
-                                                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
-                                                trace!("set mtime for {dest:?}");
-                                                // set the file's mtime
-                                                let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
-                                                filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
-                                            }
-                                        },
-                                        DedupMethod::HardlinkScript | DedupMethod::SymlinkScript | DedupMethod::ReflinkScript | DedupMethod::CopyScript => { 
-                                            if let Some(contents) = &contents {
-                                                if dedup_script.is_none() {
-                                                    dedup_script = Some(std::io::BufWriter::new(std::fs::File::create(&restore_cmd.dedup_script_path)?));
-                                                }
-                                                if let Some(dedup_script) = &mut dedup_script {
-                                                    let mut contents = contents.clone();
-                                                    let mut dest = dest;
-                                                    let mut remapped_contents = false;
-                                                    let mut remapped_dest = false;
-                                                    for (k, v) in &dedup_script_remap {
-                                                        let k = PathBuf::from(k);
-                                                        let v = PathBuf::from(v);
-                                                        if !remapped_contents {
-                                                            if let Ok(removed) = contents.strip_prefix(&k) {
-                                                                contents = v.join(removed);
-                                                                remapped_contents = true;
+                                                else {
+                                                    trace!("Looking for checksum {checksum:?} in database", checksum=full_backup.checksum);
+                                                    let rows = stmt.query(params![full_backup.checksum, stfu8::encode_u8_pretty(full_backup.dest_path.as_os_str().as_bytes())])?;
+                                                    let rows_iter = serde_rusqlite::from_rows::<File>(rows);
+                                                    for contents_file in rows_iter {
+                                                        let contents_file = contents_file?;
+                                                        trace!("Found contents_file record: {contents_file:?}");
+                                                        trace!("restore_path={restore_path:?}", restore_path=restore_cmd.restore_path);
+                                                        trace!("contents_file.path={contents_file_path:?}", contents_file_path=contents_file.path);
+                                                        let mut contents_file_dest_path = [
+                                                            restore_cmd.restore_path.as_path(),
+                                                            &contents_file.path.strip_prefix("/").unwrap_or_else(|_| contents_file.path.as_path()),
+                                                        ].iter().collect::<PathBuf>();
+                                                        for prefix in &restore_cmd.strip_prefix {
+                                                            if let Ok(stripped) = contents_file_dest_path.strip_prefix(prefix) {
+                                                                contents_file_dest_path = stripped.to_path_buf();
+                                                                break;
                                                             }
                                                         }
-                                                        if !remapped_dest  {
-                                                            if let Ok(removed) = dest.strip_prefix(&k) {
-                                                                dest = v.join(removed);
-                                                                remapped_dest = true;
+                                                        trace!("Found contents_file_dest_path: {contents_file_dest_path:?}");
+                                                        if let Some(metadata) = contents_file_dest_path.symlink_metadata().ok() {
+                                                            trace!("exists={exists:?} is_file={is_file:?} is_symlink={is_symlink:?} size={size:?} mtime={mtime:?}, full_backup.size={full_backup_size}, full_backup.source_mtime={full_backup_source_mtime}",
+                                                                exists=contents_file_dest_path.exists(),
+                                                                is_file=contents_file_dest_path.is_file(),
+                                                                is_symlink=contents_file_dest_path.is_symlink(),
+                                                                size=metadata.size(),
+                                                                mtime=metadata.mtime(),
+                                                                full_backup_size=full_backup.size,
+                                                                full_backup_source_mtime=full_backup.source_mtime,
+                                                            );
+                                                            if contents_file_dest_path.exists() && 
+                                                                contents_file_dest_path.is_file() && 
+                                                                !contents_file_dest_path.is_symlink() && 
+                                                                metadata.size() == full_backup.size && 
+                                                                metadata.mtime() == full_backup.source_mtime
+                                                            {
+                                                                contents = Some(contents_file_dest_path.clone());
+                                                                trace!("Found contents {contents_file_dest_path:?} for file {dest:?}");
+                                                                if ! restore_cmd.list_tapes {
+                                                                    info!("[DEDUP] {contents_file_dest_path:?} -> {dest:?}");
+                                                                }
+                                                                break;
                                                             }
                                                         }
-                                                        if remapped_contents && remapped_dest {
-                                                            break;
-                                                        }
                                                     }
-                                                    if dedup_method == DedupMethod::ReflinkScript {
-                                                        dedup_script.write(&format_bytes!(b"cp -vf --reflink {} {}\n",
-                                                            Sh::quote(&contents),
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                        dedup_script.write(&format_bytes!(b"chown {}:{} {}\n", 
-                                                            full_backup.uid,
-                                                            full_backup.gid,
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                        dedup_script.write(&format_bytes!(b"chmod {} {}\n", 
-                                                            format!("{:o}", full_backup.mode & 0o7777).as_bytes(),
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                        dedup_script.write(&format_bytes!(b"touch -d @{} {}\n", 
-                                                            full_backup.mtime,
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                    }
-                                                    else if dedup_method == DedupMethod::CopyScript {
-                                                        dedup_script.write(&format_bytes!(b"cp -vf {} {}\n",
-                                                            Sh::quote(&contents),
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                        dedup_script.write(&format_bytes!(b"chown {}:{} {}\n", 
-                                                            full_backup.uid,
-                                                            full_backup.gid,
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                        dedup_script.write(&format_bytes!(b"chmod {} {}\n", 
-                                                            format!("{:o}", full_backup.mode & 0o7777).as_bytes(),
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                        dedup_script.write(&format_bytes!(b"touch -d @{} {}\n", 
-                                                            full_backup.mtime,
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                    }
-                                                    else if dedup_method == DedupMethod::HardlinkScript {
-                                                        dedup_script.write(&format_bytes!(b"ln -vf {} {}\n", 
-                                                            Sh::quote(&contents),
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                    }
-                                                    else if dedup_method == DedupMethod::SymlinkScript {
-                                                        dedup_script.write(&format_bytes!(b"ln -svf {} {}\n", 
-                                                            Sh::quote(&contents),
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                        dedup_script.write(&format_bytes!(b"chown {}:{} --no-dereference {}\n", 
-                                                            full_backup.uid,
-                                                            full_backup.gid,
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                        dedup_script.write(&format_bytes!(b"touch --no-dereference -d @{} {}\n", 
-                                                            full_backup.mtime,
-                                                            Sh::quote(&dest),
-                                                        ))?;
-                                                    }
-                                                    else {
-                                                        bail!("Unknown deduplication method: {dedup_method:?}"); 
+                                                    // fall back to copying if the contents file is not in the correct state
+                                                    if contents.is_none() {
+                                                        dedup_method = DedupMethod::Copy;
                                                     }
                                                 }
                                             }
-                                        },
-                                        DedupMethod::Copy => {
-                                            // generate temp file name
-                                            let randext = rand::thread_rng()
-                                                .sample_iter(&Alphanumeric)
-                                                .take(10)
-                                                .map(char::from)
-                                                .collect::<String>();
-                                            let tmp_file_name = PathBuf::from(OsString::from_vec(format_bytes!(b".{}.{}", file_name.as_bytes(), randext.as_bytes())));
-                                            let tmp_file = [
-                                                &PathBuf::from(dest_path), 
-                                                &tmp_file_name,
-                                            ].iter().collect::<PathBuf>();
-                                            trace!("tmp_file = {tmp_file:?}");
+                                            _ => {}
+                                        }
 
-                                            // perform a deduplicated copy from destination to destination
-                                            if let Some(contents) = &contents {
-                                                trace!("contents={contents:?}");
-                                                trace!("tmp_file={tmp_file:?}");
-                                                trace!("dest={dest:?}");
-                                                trace!("copying {contents:?} to {tmp_file:?}");
-                                                std::fs::copy(&contents, &tmp_file)?;
-                                                trace!("chown {tmp_file:?}");
-                                                std::os::unix::fs::chown(&tmp_file, Some(full_backup.uid), Some(full_backup.gid))?;
-                                                // set mode
-                                                trace!("chmod {tmp_file:?}");
-                                                std::fs::set_permissions(&tmp_file, std::fs::Permissions::from_mode(full_backup.mode))?;
-                                                trace!("set mtime for {tmp_file:?}");
-                                                // set the file's mtime
-                                                let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
-                                                filetime::set_file_times(&tmp_file, mtime.clone(), mtime.clone())?;
-                                                // then move file into place
-                                                trace!("move {tmp_file:?} to {dest:?}");
-                                                std::fs::rename(&tmp_file, &dest)?;
-                                                continue;
-                                            }
-                                            
-                                            if ! restore_cmd.list_tapes {
-                                                info!("[COPY] {source:?} -> {dest:?}");
-                                            }
-
-                                            // make sure correct tape is loaded and mounted
-                                            if old_tape_id != Some(full_backup.tape_id) {
-                                                // get loader status
-                                                if let Some(tape) = tapes.get(&full_backup.tape_id) {
-                                                    let ls = self.loader_status()?;
-                                                    if let Some(se) = ls.iter().filter(|se| if let Some(label) = &se.label {*label==tape.label} else {false}).next() {
-                                                        if restore_cmd.list_tapes {
-                                                            if let Some(lt) = list_tapes.get_mut(&tape.label) {
-                                                                if is_required && !lt.is_required {
-                                                                    lt.is_required = is_required;
+                                        match dedup_method {
+                                            DedupMethod::Hardlink => { 
+                                                if let Some(contents) = &contents {
+                                                    trace!("create hardlink {dest:?} -> {contents:?}");
+                                                    if let Err(e) = std::fs::hard_link(&contents, &dest) {
+                                                        if !dest.exists() {
+                                                            Err(e)?
+                                                        }
+                                                    }
+                                                    trace!("chown {dest:?}");
+                                                    std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
+                                                    // set mode
+                                                    trace!("chmod {dest:?}");
+                                                    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                                    trace!("set mtime for {dest:?}");
+                                                    // set the file's mtime
+                                                    let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                                    filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
+                                                }
+                                            },
+                                            DedupMethod::Symlink => { 
+                                                if let Some(contents) = &contents {
+                                                    trace!("create symlink {dest:?} -> {contents:?}");
+                                                    if let Err(e) = std::os::unix::fs::symlink(&contents, &dest) {
+                                                        if std::fs::read_link(&dest).ok().as_ref() != Some(&dest) {
+                                                            Err(e)?
+                                                        }
+                                                    }
+                                                    trace!("chown {dest:?}");
+                                                    std::os::unix::fs::lchown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
+                                                    // set the file's mtime
+                                                    trace!("set mtime for {dest:?}");
+                                                    let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                                    filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
+                                                }
+                                            },
+                                            DedupMethod::Reflink => { 
+                                                if let Some(contents) = &contents {
+                                                    trace!("create reflink {dest:?} -> {contents:?}");
+                                                    if let Err(e) = reflink_copy::reflink(&contents, &dest) {
+                                                        if !dest.exists() {
+                                                            Err(e)?
+                                                        }
+                                                    }
+                                                    trace!("chown {dest:?}");
+                                                    std::os::unix::fs::chown(&dest, Some(full_backup.uid), Some(full_backup.gid))?;
+                                                    // set mode
+                                                    trace!("chmod {dest:?}");
+                                                    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                                    trace!("set mtime for {dest:?}");
+                                                    // set the file's mtime
+                                                    let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                                    filetime::set_file_times(&dest, mtime.clone(), mtime.clone())?;
+                                                }
+                                            },
+                                            DedupMethod::HardlinkScript | DedupMethod::SymlinkScript | DedupMethod::ReflinkScript | DedupMethod::CopyScript => { 
+                                                if let Some(contents) = &contents {
+                                                    if dedup_script.is_none() {
+                                                        dedup_script = Some(std::io::BufWriter::new(std::fs::File::create(&restore_cmd.dedup_script_path)?));
+                                                    }
+                                                    if let Some(dedup_script) = &mut dedup_script {
+                                                        let mut contents = contents.clone();
+                                                        let mut dest = dest;
+                                                        let mut remapped_contents = false;
+                                                        let mut remapped_dest = false;
+                                                        for (k, v) in &dedup_script_remap {
+                                                            let k = PathBuf::from(k);
+                                                            let v = PathBuf::from(v);
+                                                            if !remapped_contents {
+                                                                if let Ok(removed) = contents.strip_prefix(&k) {
+                                                                    contents = v.join(removed);
+                                                                    remapped_contents = true;
                                                                 }
                                                             }
-                                                            else {
-                                                                list_tapes.insert(tape.label.clone(), ListTape {
-                                                                    label: tape.label.clone(),
-                                                                    is_loaded: true,
-                                                                    is_required: is_required,
-                                                                });
-                                                            }
-                                                        }
-                                                        else if is_required {
-                                                            if se.storage_type == StorageType::Drive {
-                                                                debug!("Tape {label} is already loaded", label=&tape.label);
-                                                                self.fix_mountpoint()?;
-                                                                if ! self.is_mounted()? {
-                                                                    self.mount_tape()?;
+                                                            if !remapped_dest  {
+                                                                if let Ok(removed) = dest.strip_prefix(&k) {
+                                                                    dest = v.join(removed);
+                                                                    remapped_dest = true;
                                                                 }
                                                             }
-                                                            else {
-                                                                debug!("Loading tape {label}", label=&tape.label);
-                                                                self.unmount_tape()?;
-                                                                self.load_tape(se.index)?;
-                                                                self.mount_tape()?;
-                                                                current_tape_label = Some(tape.label.clone());
-
-                                                                // recompute source path
-                                                                let source_path = [
-                                                                    &self.ltfs_path, 
-                                                                    &PathBuf::from(if let Some(l) = &current_tape_label {l} else {"unknown"}),
-                                                                    &PathBuf::from("backup"),
-                                                                    &PathBuf::from(
-                                                                        self.db.file_stem().unwrap_or(&OsString::from("backup"))),
-                                                                    &PathBuf::from(&timestamp),
-                                                                    &PathBuf::from(&backup.uuid),
-                                                                    &PathBuf::from("rootfs"),
-                                                                ].iter().collect::<PathBuf>();
-                                                                debug!("source_path={source_path:?}");
-                                                                let full_backup_source_path = full_backup.source_path.strip_prefix("/").unwrap_or_else(|_| full_backup.source_path.as_path());
-                                                                source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
-                                                                    &source_path.as_path(),
-                                                                    &full_backup_source_path,
-                                                                ].iter().collect::<PathBuf>().display().to_string())?));
-                                                                trace!("source={source:?}");
+                                                            if remapped_contents && remapped_dest {
+                                                                break;
                                                             }
                                                         }
-                                                    }
-                                                    else {
-                                                        if restore_cmd.list_tapes {
-                                                            if let Some(lt) = list_tapes.get_mut(&tape.label) {
-                                                                if is_required && !lt.is_required {
-                                                                    lt.is_required = is_required;
-                                                                }
-                                                            }
-                                                            else {
-                                                                list_tapes.insert(tape.label.clone(), ListTape {
-                                                                    label: tape.label.clone(),
-                                                                    is_loaded: false,
-                                                                    is_required: is_required,
-                                                                });
-                                                            }
+                                                        if dedup_method == DedupMethod::ReflinkScript {
+                                                            dedup_script.write(&format_bytes!(b"cp -vf --reflink {} {}\n",
+                                                                Sh::quote(&contents),
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                            dedup_script.write(&format_bytes!(b"chown {}:{} {}\n", 
+                                                                full_backup.uid,
+                                                                full_backup.gid,
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                            dedup_script.write(&format_bytes!(b"chmod {} {}\n", 
+                                                                format!("{:o}", full_backup.mode & 0o7777).as_bytes(),
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                            dedup_script.write(&format_bytes!(b"touch -d @{} {}\n", 
+                                                                full_backup.mtime,
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                        }
+                                                        else if dedup_method == DedupMethod::CopyScript {
+                                                            dedup_script.write(&format_bytes!(b"cp -vf {} {}\n",
+                                                                Sh::quote(&contents),
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                            dedup_script.write(&format_bytes!(b"chown {}:{} {}\n", 
+                                                                full_backup.uid,
+                                                                full_backup.gid,
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                            dedup_script.write(&format_bytes!(b"chmod {} {}\n", 
+                                                                format!("{:o}", full_backup.mode & 0o7777).as_bytes(),
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                            dedup_script.write(&format_bytes!(b"touch -d @{} {}\n", 
+                                                                full_backup.mtime,
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                        }
+                                                        else if dedup_method == DedupMethod::HardlinkScript {
+                                                            dedup_script.write(&format_bytes!(b"ln -vf {} {}\n", 
+                                                                Sh::quote(&contents),
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                        }
+                                                        else if dedup_method == DedupMethod::SymlinkScript {
+                                                            dedup_script.write(&format_bytes!(b"ln -svf {} {}\n", 
+                                                                Sh::quote(&contents),
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                            dedup_script.write(&format_bytes!(b"chown {}:{} --no-dereference {}\n", 
+                                                                full_backup.uid,
+                                                                full_backup.gid,
+                                                                Sh::quote(&dest),
+                                                            ))?;
+                                                            dedup_script.write(&format_bytes!(b"touch --no-dereference -d @{} {}\n", 
+                                                                full_backup.mtime,
+                                                                Sh::quote(&dest),
+                                                            ))?;
                                                         }
                                                         else {
-                                                            bail!("Could not find tape with label {label} in loader!", label=tape.label);
+                                                            bail!("Unknown deduplication method: {dedup_method:?}"); 
                                                         }
                                                     }
                                                 }
-                                                else {
-                                                    bail!("Could not find database record for tape with id {label}!", label=full_backup.tape_id);
-                                                }
-                                                old_tape_id = Some(full_backup.tape_id);
-                                            }
+                                            },
+                                            DedupMethod::Copy => {
+                                                // generate temp file name
+                                                let randext = rand::thread_rng()
+                                                    .sample_iter(&Alphanumeric)
+                                                    .take(10)
+                                                    .map(char::from)
+                                                    .collect::<String>();
+                                                let tmp_file_name = PathBuf::from(OsString::from_vec(format_bytes!(b".{}.{}", file_name.as_bytes(), randext.as_bytes())));
+                                                let tmp_file = [
+                                                    &PathBuf::from(dest_path), 
+                                                    &tmp_file_name,
+                                                ].iter().collect::<PathBuf>();
+                                                trace!("tmp_file = {tmp_file:?}");
 
-                                            // if --list-tapes was specified, skip the next section, since the tape
-                                            // won't actually be loaded
-                                            if restore_cmd.list_tapes {
-                                                continue;
-                                            }
-
-                                            // make sure the source file exists
-                                            if !source.exists() {
-                                                if restore_cmd.verify_db {
-                                                    info!("File {source:?} does not exist, queueing for deletion");
-                                                    deleted_files.push(full_backup.clone());
-                                                }
-                                                else {
-                                                    bail!("Error: File {source:?} does not exist on tape!");
-                                                }
-                                            } 
-                                            else if !source.is_file() {
-                                                bail!("Error: File {source:?} exists on tape but is not a file!");
-                                            } 
-                                            else {
-                                                // check file size and mtimes match
-                                                let metadata = match std::fs::symlink_metadata(&source) {
-                                                    Ok(m) => m,
-                                                    Err(e) => {
-                                                        bail!("Could not extract metadata for file {source:?}: {e}");
-                                                    }
-                                                };
-                                                if metadata.size() != full_backup.size {
-                                                    bail!("Error: File {source:?} has size {msize} is different than database size {fbsize}", msize=metadata.size(), fbsize=full_backup.size);
-                                                }
-                                                if metadata.mtime() != full_backup.mtime {
-                                                    bail!("Error: File {source:?} has mtime {mmtime} is different than database size {fbmtime}", mmtime=metadata.mtime(), fbmtime=full_backup.mtime);
-                                                }
-
-                                                if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                                                    // copy the file
-                                                    trace!("source={source:?}");
+                                                // perform a deduplicated copy from destination to destination
+                                                if let Some(contents) = &contents {
+                                                    trace!("contents={contents:?}");
                                                     trace!("tmp_file={tmp_file:?}");
                                                     trace!("dest={dest:?}");
-                                                    trace!("copying {source:?} to {tmp_file:?}");
-                                                    std::fs::copy(&source, &tmp_file)?;
+                                                    trace!("copying {contents:?} to {tmp_file:?}");
+                                                    std::fs::copy(&contents, &tmp_file)?;
                                                     trace!("chown {tmp_file:?}");
                                                     std::os::unix::fs::chown(&tmp_file, Some(full_backup.uid), Some(full_backup.gid))?;
                                                     // set mode
@@ -3262,44 +3129,203 @@ impl Options {
                                                     // then move file into place
                                                     trace!("move {tmp_file:?} to {dest:?}");
                                                     std::fs::rename(&tmp_file, &dest)?;
+                                                    continue;
+                                                }
+                                                
+                                                if ! restore_cmd.list_tapes {
+                                                    info!("[COPY] {source:?} -> {dest:?}");
+                                                }
+
+                                                // make sure correct tape is loaded and mounted
+                                                if old_tape_id != Some(full_backup.tape_id) {
+                                                    // get loader status
+                                                    if let Some(tape) = tapes.get(&full_backup.tape_id) {
+                                                        let ls = self.loader_status()?;
+                                                        if let Some(se) = ls.iter().filter(|se| if let Some(label) = &se.label {*label==tape.label} else {false}).next() {
+                                                            if restore_cmd.list_tapes {
+                                                                if let Some(lt) = list_tapes.get_mut(&tape.label) {
+                                                                    if is_required && !lt.is_required {
+                                                                        lt.is_required = is_required;
+                                                                    }
+                                                                }
+                                                                else {
+                                                                    list_tapes.insert(tape.label.clone(), ListTape {
+                                                                        label: tape.label.clone(),
+                                                                        is_loaded: true,
+                                                                        is_required: is_required,
+                                                                    });
+                                                                }
+                                                            }
+                                                            else if is_required {
+                                                                found_tapes.insert(tape.label.clone());
+                                                                if se.storage_type == StorageType::Drive {
+                                                                    debug!("Tape {label} is already loaded", label=&tape.label);
+                                                                    self.fix_mountpoint()?;
+                                                                    if ! self.is_mounted()? {
+                                                                        self.mount_tape()?;
+                                                                    }
+                                                                }
+                                                                else {
+                                                                    debug!("Loading tape {label}", label=&tape.label);
+                                                                    self.unmount_tape()?;
+                                                                    self.load_tape(se.index)?;
+                                                                    self.mount_tape()?;
+                                                                    current_tape_label = Some(tape.label.clone());
+
+                                                                    // recompute source path
+                                                                    let source_path = [
+                                                                        &self.ltfs_path, 
+                                                                        &PathBuf::from(if let Some(l) = &current_tape_label {l} else {"unknown"}),
+                                                                        &PathBuf::from("backup"),
+                                                                        &PathBuf::from(
+                                                                            self.db.file_stem().unwrap_or(&OsString::from("backup"))),
+                                                                        &PathBuf::from(&timestamp),
+                                                                        &PathBuf::from(&backup.uuid),
+                                                                        &PathBuf::from("rootfs"),
+                                                                    ].iter().collect::<PathBuf>();
+                                                                    debug!("source_path={source_path:?}");
+                                                                    let full_backup_source_path = full_backup.source_path.strip_prefix("/").unwrap_or_else(|_| full_backup.source_path.as_path());
+                                                                    source = PathBuf::from(OsString::from_vec(stfu8::decode_u8(&[
+                                                                        &source_path.as_path(),
+                                                                        &full_backup_source_path,
+                                                                    ].iter().collect::<PathBuf>().display().to_string())?));
+                                                                    trace!("source={source:?}");
+                                                                }
+                                                            }
+                                                        }
+                                                        else {
+                                                            if restore_cmd.list_tapes {
+                                                                if let Some(lt) = list_tapes.get_mut(&tape.label) {
+                                                                    if is_required && !lt.is_required {
+                                                                        lt.is_required = is_required;
+                                                                    }
+                                                                }
+                                                                else {
+                                                                    list_tapes.insert(tape.label.clone(), ListTape {
+                                                                        label: tape.label.clone(),
+                                                                        is_loaded: false,
+                                                                        is_required: is_required,
+                                                                    });
+                                                                }
+                                                            }
+                                                            else {
+                                                                missing_tapes.insert(tape.label.clone());
+                                                            }
+                                                        }
+                                                    }
+                                                    else {
+                                                        bail!("Could not find database record for tape with id {label}!", label=full_backup.tape_id);
+                                                    }
+                                                    old_tape_id = Some(full_backup.tape_id);
+                                                }
+
+                                                // if --list-tapes was specified, skip the next section, since the tape
+                                                // won't actually be loaded
+                                                if restore_cmd.list_tapes {
+                                                    continue;
+                                                }
+
+                                                // make sure the source file exists
+                                                if !source.exists() {
+                                                    if restore_cmd.verify_db {
+                                                        info!("File {source:?} does not exist, queueing for deletion");
+                                                        deleted_files.push(full_backup.clone());
+                                                    }
+                                                    else {
+                                                        bail!("Error: File {source:?} does not exist on tape!");
+                                                    }
+                                                } 
+                                                else if !source.is_file() {
+                                                    bail!("Error: File {source:?} exists on tape but is not a file!");
+                                                } 
+                                                else {
+                                                    // check file size and mtimes match
+                                                    let metadata = match std::fs::symlink_metadata(&source) {
+                                                        Ok(m) => m,
+                                                        Err(e) => {
+                                                            bail!("Could not extract metadata for file {source:?}: {e}");
+                                                        }
+                                                    };
+                                                    if metadata.size() != full_backup.size {
+                                                        bail!("Error: File {source:?} has size {msize} is different than database size {fbsize}", msize=metadata.size(), fbsize=full_backup.size);
+                                                    }
+                                                    if metadata.mtime() != full_backup.mtime {
+                                                        bail!("Error: File {source:?} has mtime {mmtime} is different than database size {fbmtime}", mmtime=metadata.mtime(), fbmtime=full_backup.mtime);
+                                                    }
+
+                                                    if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                                                        // copy the file
+                                                        trace!("source={source:?}");
+                                                        trace!("tmp_file={tmp_file:?}");
+                                                        trace!("dest={dest:?}");
+                                                        trace!("copying {source:?} to {tmp_file:?}");
+                                                        std::fs::copy(&source, &tmp_file)?;
+                                                        trace!("chown {tmp_file:?}");
+                                                        std::os::unix::fs::chown(&tmp_file, Some(full_backup.uid), Some(full_backup.gid))?;
+                                                        // set mode
+                                                        trace!("chmod {tmp_file:?}");
+                                                        std::fs::set_permissions(&tmp_file, std::fs::Permissions::from_mode(full_backup.mode))?;
+                                                        trace!("set mtime for {tmp_file:?}");
+                                                        // set the file's mtime
+                                                        let mtime = FileTime::from_unix_time(full_backup.mtime, 0);
+                                                        filetime::set_file_times(&tmp_file, mtime.clone(), mtime.clone())?;
+                                                        // then move file into place
+                                                        trace!("move {tmp_file:?} to {dest:?}");
+                                                        std::fs::rename(&tmp_file, &dest)?;
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+                                    else {
+                                        bail!("Could not parse dest file_name!");
+                                    }
                                 }
                                 else {
-                                    bail!("Could not parse dest file_name!");
+                                    bail!("Could not parse dest parent!");
                                 }
-                            }
-                            else {
-                                bail!("Could not parse dest parent!");
-                            }
-                        },
-                    };
+                            },
+                        };
+                    }
                 }
-            }
-            // set the mtime for the previous directory
-            while let Some((old_dir, mtime)) = old_dir.pop() {
-                let filetime = FileTime::from_unix_time(mtime, 0);
-                if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
-                    trace!("set mtime for old_dir {old_dir:?} to {mtime}");
-                    filetime::set_file_times(old_dir, filetime.clone(), filetime.clone())?;
+                // set the mtime for the previous directory
+                while let Some((old_dir, mtime)) = old_dir.pop() {
+                    let filetime = FileTime::from_unix_time(mtime, 0);
+                    if ! restore_cmd.dry_run && ! restore_cmd.list_tapes {
+                        trace!("set mtime for old_dir {old_dir:?} to {mtime}");
+                        filetime::set_file_times(old_dir, filetime.clone(), filetime.clone())?;
+                    }
                 }
-            }
-            // remove files from db that are missing on tape
-            if restore_cmd.verify_db {
-                let tx = conn.transaction()?;
-                for full_backup in &deleted_files {
-                    info!("Removing records for {source:?}", source=full_backup.dest_path);
-                    let sql = r#"delete from backup2file where file_id=?1"#;
-                    trace!("Running sql delete:\n{sql}\n");
-                    tx.execute(sql, params![full_backup.file_id])?; 
-                    let sql = r#"delete from file where id=?1"#;
-                    trace!("Running sql delete:\n{sql}\n");
-                    tx.execute(sql, params![full_backup.file_id])?;
+                // remove files from db that are missing on tape
+                if restore_cmd.verify_db {
+                    let tx = conn.transaction()?;
+                    for full_backup in &deleted_files {
+                        info!("Removing records for {source:?}", source=full_backup.dest_path);
+                        let sql = r#"delete from backup2file where file_id=?1"#;
+                        trace!("Running sql delete:\n{sql}\n");
+                        tx.execute(sql, params![full_backup.file_id])?; 
+                        let sql = r#"delete from file where id=?1"#;
+                        trace!("Running sql delete:\n{sql}\n");
+                        tx.execute(sql, params![full_backup.file_id])?;
+                    }
+                    tx.commit()?;
+                    info!("Verification complete, removed {count} files from the database", count=deleted_files.len());
                 }
-                tx.commit()?;
-                info!("Verification complete, removed {count} files from the database", count=deleted_files.len());
+
+                if missing_tapes.is_empty() {
+                    break;
+                }
+                else {
+                    warn!("Please load the following tapes (or as many as you can): {missing_tapes:?}");
+                    // get the intersection of the found tapes hashset and loaded tapes vec, be careful of references
+                    let found_and_loaded_tapes = loaded_tapes.iter().filter(|lt| found_tapes.contains(lt.as_str())).map(|lt| lt.clone()).collect::<Vec<String>>();
+                    if ! found_and_loaded_tapes.is_empty() {
+                        warn!("You may remove the following already restored tapes to make room: {found_and_loaded_tapes:?}");
+                    }
+                    warn!("Once the tapes are loaded, press ENTER to continue...");
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                }
             }
         }
         else {
