@@ -1715,7 +1715,7 @@ impl Options {
         debug!("timestamp={timestamp}");
 
         // compute the destination path on the ltfs filesystem
-        let dest = [
+        let mut dest = [
             &self.ltfs_path, 
             &PathBuf::from(tape.map(|t| t.label.clone()).unwrap_or(None).unwrap_or("unknown".to_string())), 
             &PathBuf::from("backup"),
@@ -1897,6 +1897,19 @@ impl Options {
                                             if tape_full {
                                                 bail!("Tape is full!");
                                             }
+
+                                            // update the dest path
+                                            dest = [
+                                                &self.ltfs_path, 
+                                                &PathBuf::from(tape.map(|t| t.label.clone()).unwrap_or(None).unwrap_or("unknown".to_string())), 
+                                                &PathBuf::from("backup"),
+                                                &PathBuf::from(
+                                                    self.db.file_stem().unwrap_or(&OsString::from("backup"))),
+                                                &PathBuf::from(timestamp.clone()),
+                                                &PathBuf::from(backup_uuid.to_string()),
+                                                &PathBuf::from("rootfs"),
+                                            ].iter().collect::<PathBuf>();
+                                            debug!("dest={dest:?}");
                                         }
 
                                         // ignore any entries that are not one of: directory, file, symlink
